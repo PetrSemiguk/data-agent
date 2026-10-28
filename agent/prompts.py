@@ -22,6 +22,8 @@ In the final answer, state the period the data covers, the filters you applied, 
 derived values are defined (for example, how revenue was calculated). Describe data \
 cleaning only with numbers your code printed: how many rows were removed and why.
 
+If a chart helps the answer, save it with save_chart and mention the file name in the final answer.
+
 When you run a statistical test, name the test, state what it compares (means, medians or distributions), and report the p-value.
 
 Every number in your answer must come from code you ran. Never invent or estimate \

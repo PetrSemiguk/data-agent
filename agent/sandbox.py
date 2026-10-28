@@ -13,7 +13,7 @@ from typing import Any
 from jupyter_client.blocking.client import BlockingKernelClient
 from jupyter_client.manager import KernelManager
 
-from agent.config import CODE_TIMEOUT_SECONDS, PANDAS_DISPLAY_OPTIONS
+from agent.config import CODE_TIMEOUT_SECONDS, MATPLOTLIB_RC_PARAMS, PANDAS_DISPLAY_OPTIONS
 
 # IPython colors tracebacks with ANSI escape codes; the model does not need them.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -174,7 +174,11 @@ class Sandbox:
         options = "\n".join(
             f"pd.set_option({name!r}, {value!r})" for name, value in PANDAS_DISPLAY_OPTIONS.items()
         )
-        result = self.execute(f"%matplotlib inline\nimport pandas as pd\n{options}")
+        # Imports the model expects, as in any notebook.
+        imports = "import numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt"
+        # Set after %matplotlib inline, which applies its own rc defaults.
+        rc_params = f"plt.rcParams.update({MATPLOTLIB_RC_PARAMS!r})"
+        result = self.execute(f"%matplotlib inline\n{imports}\n{options}\n{rc_params}")
         if not result.success:
             raise RuntimeError(f"Kernel setup failed:\n{result.error}")
 

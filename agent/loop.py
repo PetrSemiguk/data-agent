@@ -2,16 +2,19 @@
 
 import json
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import anthropic
 
-from agent.config import MAX_STEPS
+from agent.config import MAX_STEPS, OUTPUTS_DIR
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import TOOLS, execute_tool
 
 SEPARATOR = "-" * 80
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def run_agent(
@@ -28,6 +31,11 @@ def run_agent(
     api_seconds = 0.0
     code_seconds = 0.0
     run_start = time.perf_counter()
+
+    # Every run saves its files (charts) into its own folder.
+    run_dir = PROJECT_ROOT / OUTPUTS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output folder: {run_dir.as_posix()}")
 
     try:
         for step in range(1, max_steps + 1):
@@ -69,7 +77,7 @@ def run_agent(
                 if block.type != "tool_use":
                     continue
                 start = time.perf_counter()
-                output, is_error = execute_tool(block.name, block.input, sandbox)
+                output, is_error = execute_tool(block.name, block.input, sandbox, run_dir)
                 elapsed = time.perf_counter() - start
                 code_seconds += elapsed
                 # Let the model see slow operations.
@@ -93,6 +101,10 @@ def run_agent(
             f"Time: total={total_seconds:.1f}s, API={api_seconds:.1f}s, "
             f"code={code_seconds:.1f}s"
         )
+        charts = sorted(run_dir.glob("*.png"))
+        print(f"Saved charts ({len(charts)}):")
+        for chart in charts:
+            print(f"  {chart.as_posix()}")
 
 
 def extract_text(content: list[Any]) -> str:

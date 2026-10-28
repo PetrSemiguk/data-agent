@@ -1,6 +1,9 @@
 """Tool definitions for Claude and the code that executes them."""
 
+import base64
+import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from agent.config import MAX_OUTPUT_CHARS, OUTPUT_HEAD_CHARS, OUTPUT_TAIL_CHARS
@@ -33,6 +36,7 @@ RUN_CODE_TOOL: dict[str, Any] = {
     "description": (
         "Execute Python code in a persistent Jupyter kernel and return its output. "
         "The dataset is already loaded into a pandas DataFrame named `df`. "
+        "pandas as pd, numpy as np and matplotlib.pyplot as plt are already imported. "
         "Variables, imports and functions persist between calls, so build the "
         "analysis step by step instead of repeating earlier work. "
         "To see a value, print() it or leave the expression as the last line of "
@@ -54,7 +58,40 @@ RUN_CODE_TOOL: dict[str, Any] = {
     },
 }
 
-TOOLS: list[dict[str, Any]] = [GET_SCHEMA_TOOL, RUN_CODE_TOOL]
+SAVE_CHART_TOOL: dict[str, Any] = {
+    "name": "save_chart",
+    "description": (
+        "Run matplotlib code that builds ONE final chart and save it as a PNG file for "
+        "the user. Use this only for final charts that belong in the answer; for quick "
+        "checks while exploring, use run_code. Make a separate call for each chart. "
+        "pandas as pd, numpy as np and matplotlib.pyplot as plt are already imported. "
+        "Always label the axes and give the chart a title. Do not call plt.show() or "
+        "plt.savefig(): the figure is captured and saved automatically. "
+        "Returns the saved file path and size."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "Matplotlib code that builds one chart. `df` and earlier variables are available.",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Short file name without extension, e.g. 'revenue_by_category'.",
+            },
+            "title": {
+                "type": "string",
+                "description": "Optional chart title; replaces the title set in the code.",
+            },
+        },
+        "required": ["code", "filename"],
+    },
+}
+
+TOOLS: list[dict[str, Any]] = [GET_SCHEMA_TOOL, RUN_CODE_TOOL, SAVE_CHART_TOOL]
+
+MAX_FILENAME_CHARS = 60
 
 MAX_SCHEMA_COLUMNS = 50
 DATE_SAMPLE_SIZE = 200
@@ -126,7 +163,25 @@ def truncate_output(text: str) -> str:
     return text[:OUTPUT_HEAD_CHARS] + marker + text[-OUTPUT_TAIL_CHARS:]
 
 
-def run_code(tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]:
+def safe_filename(name: str) -> str:
+    """Reduce a model-supplied name to [a-z0-9_-] so it cannot escape the run folder."""
+    cleaned = re.sub(r"[^a-z0-9_-]+", "_", name.lower()).strip("_-")
+    return cleaned[:MAX_FILENAME_CHARS] or "chart"
+
+
+def unique_path(folder: Path, stem: str) -> Path:
+    """Return folder/stem.png, adding _2, _3, ... instead of overwriting a file."""
+    path = folder / f"{stem}.png"
+    counter = 2
+    while path.exists():
+        path = folder / f"{stem}_{counter}.png"
+        counter += 1
+    return path
+
+
+def run_code(
+    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
+) -> tuple[str, bool]:
     """Execute model-written code and turn the result into text."""
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
@@ -148,7 +203,9 @@ def run_code(tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]:
     return text, not result.success
 
 
-def get_schema(tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]:
+def get_schema(
+    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
+) -> tuple[str, bool]:
     """Describe a DataFrame that lives in the kernel."""
     variable = tool_input.get("variable", "df")
     # Only plain names: the value is inserted into code that runs in the kernel.
@@ -164,15 +221,64 @@ def get_schema(tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]
     return text, text.startswith("ERROR:")
 
 
-TOOL_HANDLERS: dict[str, Callable[[dict[str, Any], Sandbox], tuple[str, bool]]] = {
+def save_chart(
+    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
+) -> tuple[str, bool]:
+    """Run chart code and save every captured PNG into the run folder."""
+    if output_dir is None:
+        return "save_chart is not available: no output folder for this run.", True
+    code = tool_input.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return "Missing required input: code (a non-empty string).", True
+
+    title = tool_input.get("title")
+    if isinstance(title, str) and title.strip():
+        # Only touch a figure the code left open, never create an empty one.
+        code += (
+            "\nimport matplotlib.pyplot as _plt\n"
+            f"if _plt.get_fignums():\n    _plt.gca().set_title({title!r})\n"
+        )
+
+    result = sandbox.execute(code)
+    if not result.success:
+        return result.error or "Chart code failed.", True
+    if not result.images:
+        return (
+            "Error: no figure was produced. Build a matplotlib chart in the code "
+            "and do not call plt.close() before the end.",
+            True,
+        )
+
+    stem = safe_filename(str(tool_input.get("filename", "")))
+    lines: list[str] = []
+    for index, image in enumerate(result.images, start=1):
+        name = stem if len(result.images) == 1 else f"{stem}_{index}"
+        path = unique_path(output_dir, name)
+        path.write_bytes(base64.b64decode(image))
+        lines.append(f"Saved chart: {path.as_posix()} ({path.stat().st_size / 1024:.1f} KB)")
+    if result.stdout.strip():
+        lines.append(result.stdout.rstrip())
+    return "\n".join(lines), False
+
+
+ToolHandler = Callable[[dict[str, Any], Sandbox, Path | None], tuple[str, bool]]
+
+TOOL_HANDLERS: dict[str, ToolHandler] = {
     GET_SCHEMA_TOOL["name"]: get_schema,
     RUN_CODE_TOOL["name"]: run_code,
+    SAVE_CHART_TOOL["name"]: save_chart,
 }
 
 
-def execute_tool(name: str, tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]:
+def execute_tool(
+    name: str,
+    tool_input: dict[str, Any],
+    sandbox: Sandbox,
+    output_dir: Path | None = None,
+) -> tuple[str, bool]:
     """Run a tool requested by the model.
 
+    `output_dir` is the run folder where files such as charts are saved.
     Returns the text to send back to the model and whether it is an error.
     """
     handler = TOOL_HANDLERS.get(name)
@@ -180,5 +286,5 @@ def execute_tool(name: str, tool_input: dict[str, Any], sandbox: Sandbox) -> tup
         available = ", ".join(TOOL_HANDLERS)
         return f"Unknown tool: {name}. Available tools: {available}.", True
 
-    text, is_error = handler(tool_input, sandbox)
+    text, is_error = handler(tool_input, sandbox, output_dir)
     return truncate_output(text), is_error

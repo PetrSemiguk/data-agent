@@ -1,6 +1,8 @@
 """Checks for agent.tools: truncate_output and get_schema (no API calls)."""
 
+import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -13,6 +15,8 @@ from agent.sandbox import Sandbox  # noqa: E402
 from agent.tools import execute_tool, truncate_output  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+CHART_CODE = 'df.groupby("Category")["Sales"].sum().plot.bar(title="Revenue by category")'
 
 passed = 0
 failed = 0
@@ -76,6 +80,47 @@ def main() -> int:
         text, _ = execute_tool("get_schema", {}, sb)
         order_date = next((line for line in text.splitlines() if line.startswith("- Order Date:")), "")
         report("h) Order Date looks like date", "looks like date" in order_date, order_date)
+
+        # save_chart writes into a throwaway run folder
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            # j) Simple chart is saved as a real PNG
+            text, is_error = execute_tool(
+                "save_chart", {"code": CHART_CODE, "filename": "revenue"}, sb, run_dir)
+            first = run_dir / "revenue.png"
+            data = first.read_bytes() if first.exists() else b""
+            width, height = struct.unpack(">II", data[16:24]) if len(data) > 24 else (0, 0)
+            report("j) chart saved as PNG", not is_error and data.startswith(PNG_SIGNATURE),
+                   f"{first.name}, {len(data) / 1024:.1f} KB, {width}x{height} px")
+
+            # k) Dangerous name stays inside the run folder
+            text, is_error = execute_tool(
+                "save_chart", {"code": CHART_CODE, "filename": "../../evil name!"}, sb, run_dir)
+            files = sorted(p.name for p in run_dir.iterdir())
+            outside = list(run_dir.parent.glob("*evil*"))
+            report("k) unsafe filename sanitized",
+                   not is_error and (run_dir / "evil_name.png").exists() and not outside,
+                   f"files in run folder: {files}")
+
+            # l) Same name again gets a suffix, first file is untouched
+            before = first.read_bytes()
+            text, is_error = execute_tool(
+                "save_chart", {"code": CHART_CODE, "filename": "revenue"}, sb, run_dir)
+            report("l) no overwrite",
+                   not is_error and (run_dir / "revenue_2.png").exists()
+                   and first.read_bytes() == before,
+                   f"second call -> {first.with_name('revenue_2.png').name}")
+
+            # m) Code without a figure is an error
+            text, is_error = execute_tool(
+                "save_chart", {"code": "x = 1", "filename": "empty"}, sb, run_dir)
+            report("m) no figure -> error", is_error and "no figure" in text, text.splitlines()[0])
+
+            # n) Failing code is an error
+            text, is_error = execute_tool(
+                "save_chart", {"code": "df['Nope'].plot()", "filename": "broken"}, sb, run_dir)
+            report("n) failing code -> error", is_error and "KeyError" in text, text.splitlines()[0])
 
         # i) Fast enough on 1M rows
         sb.load_dataframe(DATA_DIR / "online_retail_II.csv")
