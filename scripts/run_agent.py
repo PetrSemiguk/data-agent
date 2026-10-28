@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -42,7 +43,12 @@ def main() -> int:
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
         result = run_agent(
-            args.question, sb, client, ask_user_fn=ask_user_fn, dataset_file=args.file
+            args.question,
+            sb,
+            client,
+            ask_user_fn=ask_user_fn,
+            dataset_file=args.file,
+            on_event=ConsolePrinter(),
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")

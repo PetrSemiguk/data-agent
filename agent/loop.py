@@ -1,6 +1,7 @@
 """The agent loop: ask Claude, run the tools it requests, repeat until done."""
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,12 +18,23 @@ from agent.config import (
     MAX_TOTAL_TOKENS,
     OUTPUTS_DIR,
 )
+from agent.events import (
+    ApiCallFinished,
+    AssistantText,
+    Event,
+    EventHandler,
+    RunFinished,
+    RunStarted,
+    StepStarted,
+    ToolCall,
+    ToolResult,
+)
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import TOOLS, AskUserFn, ToolContext, execute_tool
 
-SEPARATOR = "-" * 80
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 RunStatus = Literal["running", "completed", "max_steps", "budget_exceeded", "api_error", "stopped"]
 
@@ -55,13 +67,25 @@ def run_agent(
     max_steps: int = MAX_STEPS,
     ask_user_fn: AskUserFn | None = None,
     dataset_file: str | None = None,
+    on_event: EventHandler | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
     `ask_user_fn` lets the agent ask the human a clarifying question; with None
     the agent is told the user is not available and must make assumptions.
+    `on_event` receives progress events; the loop itself prints nothing.
     API errors do not raise: they end the run with status "api_error".
     """
+
+    def emit(event: Event) -> None:
+        # A broken display must never stop the analysis.
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:
+            logger.exception("Event handler failed on %s", type(event).__name__)
+
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     input_tokens = 0
     output_tokens = 0
@@ -78,8 +102,8 @@ def run_agent(
     run_id = run_dir.name
     log_path = PROJECT_ROOT / LOGS_DIR / f"{run_id}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Output folder: {run_dir.as_posix()}")
     ctx = ToolContext(sandbox=sandbox, output_dir=run_dir, ask_user_fn=ask_user_fn)
+    emit(RunStarted(run_id=run_id, output_dir=run_dir.as_posix(), log_path=log_path.as_posix()))
 
     step_logs: list[dict[str, Any]] = []
     log: dict[str, Any] = {
@@ -109,7 +133,7 @@ def run_agent(
                 )
                 break
 
-            print(f"\n{'=' * 30} Step {step} {'=' * 30}")
+            emit(StepStarted(step=step))
             start = time.perf_counter()
             try:
                 response = client.messages.create(
@@ -123,15 +147,18 @@ def run_agent(
                 api_seconds += time.perf_counter() - start
                 status = "api_error"
                 error_message = describe_api_error(exc, model)
-                print(f"[API error] {error_message}")
                 break
             elapsed = time.perf_counter() - start
             api_seconds += elapsed
             input_tokens += response.usage.input_tokens
             output_tokens += response.usage.output_tokens
-            print(
-                f"[API call: {elapsed:.1f}s, tokens in={response.usage.input_tokens} "
-                f"out={response.usage.output_tokens}]"
+            emit(
+                ApiCallFinished(
+                    step=step,
+                    duration_s=elapsed,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                )
             )
 
             step_log: dict[str, Any] = {
@@ -146,7 +173,11 @@ def run_agent(
 
             # Keep the whole assistant turn, including tool_use blocks.
             messages.append({"role": "assistant", "content": response.content})
-            print_assistant_blocks(response.content)
+            for block in response.content:
+                if block.type == "text" and block.text.strip():
+                    emit(AssistantText(step=step, text=block.text.strip()))
+                elif block.type == "tool_use":
+                    emit(ToolCall(step=step, name=block.name, input=block.input))
 
             if response.stop_reason == "end_turn":
                 status = "completed"
@@ -170,7 +201,17 @@ def run_agent(
                 code_seconds += elapsed
                 # Let the model see slow operations.
                 output = f"{output}\n[executed in {elapsed:.1f}s]"
-                print_tool_result(output, is_error)
+                emit(
+                    ToolResult(
+                        step=step,
+                        name=block.name,
+                        output=output,
+                        is_error=is_error,
+                        duration_s=elapsed,
+                        images=list(ctx.last_images),
+                        chart_paths=list(ctx.last_chart_paths),
+                    )
+                )
                 tool_results.append(
                     {
                         "type": "tool_result",
@@ -213,25 +254,20 @@ def run_agent(
             },
         )
         write_log(log_path, log)
+        result = RunResult(
+            status=status,
+            final_answer=final_answer,
+            error_message=error_message,
+            steps=len(step_logs),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            duration_s=round(duration_s, 2),
+            charts=charts,
+            log_path=log_path.as_posix(),
+        )
+        emit(RunFinished(result=result, api_duration_s=api_seconds, code_duration_s=code_seconds))
 
-        print(f"\n{SEPARATOR}\nTokens used: input={input_tokens}, output={output_tokens}")
-        print(f"Time: total={duration_s:.1f}s, API={api_seconds:.1f}s, code={code_seconds:.1f}s")
-        print(f"Saved charts ({len(charts)}):")
-        for chart in charts:
-            print(f"  {chart}")
-        print(f"Run log: {log_path.as_posix()}")
-
-    return RunResult(
-        status=status,
-        final_answer=final_answer,
-        error_message=error_message,
-        steps=len(step_logs),
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        duration_s=round(duration_s, 2),
-        charts=charts,
-        log_path=log_path.as_posix(),
-    )
+    return result
 
 
 def create_run_dir() -> Path:
@@ -294,22 +330,3 @@ def api_error_detail(exc: anthropic.AnthropicError) -> str:
 def extract_text(content: list[Any]) -> str:
     """Join all text blocks of an assistant message."""
     return "\n".join(block.text for block in content if block.type == "text").strip()
-
-
-def print_assistant_blocks(content: list[Any]) -> None:
-    """Show the agent's thoughts and the code it wants to run."""
-    for block in content:
-        if block.type == "text" and block.text.strip():
-            print(f"[Agent]\n{block.text.strip()}")
-        elif block.type == "tool_use":
-            code = block.input.get("code")
-            if isinstance(code, str):
-                print(f"[Tool: {block.name}]\n{SEPARATOR}\n{code}\n{SEPARATOR}")
-            else:
-                print(f"[Tool: {block.name}] args: {json.dumps(block.input)}")
-
-
-def print_tool_result(output: str, is_error: bool) -> None:
-    """Show what the tool returned."""
-    label = "Error" if is_error else "Result"
-    print(f"[{label}]\n{output}")

@@ -15,6 +15,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.config import MAX_TOTAL_TOKENS, OUTPUTS_DIR  # noqa: E402
+from agent.events import (  # noqa: E402
+    ApiCallFinished,
+    AssistantText,
+    Event,
+    RunFinished,
+    RunStarted,
+    StepStarted,
+    ToolCall,
+    ToolResult,
+)
 from agent.loop import RunResult, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -88,8 +98,13 @@ def cleanup(result: RunResult) -> None:
     log_path.unlink(missing_ok=True)
 
 
-def run(sb: Sandbox, client: FakeClient, max_steps: int = 15) -> tuple[RunResult, dict[str, Any] | None]:
-    result = run_agent("Test question", sb, client, max_steps=max_steps, dataset_file="test.csv")  # type: ignore[arg-type]
+def run(
+    sb: Sandbox, client: FakeClient, max_steps: int = 15, on_event: Any = None
+) -> tuple[RunResult, dict[str, Any] | None]:
+    result = run_agent(
+        "Test question", sb, client, max_steps=max_steps,  # type: ignore[arg-type]
+        dataset_file="test.csv", on_event=on_event,
+    )
     log = read_log(result)
     cleanup(result)
     return result, log
@@ -109,6 +124,40 @@ def main() -> int:
                and log is not None and len(log["steps"]) == 2 and log["status"] == "completed",
                f"status={result.status}, steps in log={len(log['steps']) if log else '-'}, "
                f"tool output={tool_output.splitlines()[0] if tool_output else '-'}")
+
+        # f) The same two-step run reports events in order
+        events: list[Event] = []
+        client = FakeClient([
+            make_response([text("Let me check."), tool_use("print(2 + 2)")], "tool_use"),
+            make_response([text("The answer is 4.")], "end_turn"),
+        ])
+        result, _ = run(sb, client, on_event=events.append)
+        expected = [RunStarted, StepStarted, ApiCallFinished, AssistantText, ToolCall, ToolResult,
+                    StepStarted, ApiCallFinished, AssistantText, RunFinished]
+        kinds = [type(e) for e in events]
+        tool_result = next((e for e in events if isinstance(e, ToolResult)), None)
+        ok = (
+            kinds == expected
+            and [e.step for e in events if isinstance(e, StepStarted)] == [1, 2]
+            and events[3].text == "Let me check."  # type: ignore[union-attr]
+            and events[4].input == {"code": "print(2 + 2)"}  # type: ignore[union-attr]
+            and tool_result is not None and tool_result.output.startswith("4") and not tool_result.is_error
+            and events[-1].result.status == "completed"  # type: ignore[union-attr]
+        )
+        report("f) events in order", ok, " -> ".join(k.__name__ for k in kinds))
+
+        # g) A crashing event handler does not break the run
+        def broken_handler(event: Event) -> None:
+            raise RuntimeError("display is broken")
+
+        client = FakeClient([
+            make_response([tool_use("print(1)")], "tool_use"),
+            make_response([text("Done.")], "end_turn"),
+        ])
+        result, _ = run(sb, client, on_event=broken_handler)
+        report("g) failing handler ignored",
+               result.status == "completed" and result.final_answer == "Done.",
+               f"status={result.status}, answer={result.final_answer!r}")
 
         # b) Bad API key
         client = FakeClient([api_error(anthropic.AuthenticationError, 401, "invalid x-api-key")])

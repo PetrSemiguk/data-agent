@@ -2,6 +2,8 @@
 
 import ast
 import atexit
+import base64
+import json
 import os
 import re
 from pathlib import Path
@@ -9,14 +11,33 @@ from pathlib import Path
 import anthropic
 import streamlit as st
 from dotenv import load_dotenv
+from streamlit.delta_generator import DeltaGenerator
+from streamlit.elements.lib.mutable_status_container import StatusContainer
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
+from agent.events import (
+    ApiCallFinished,
+    AssistantText,
+    Event,
+    RunFinished,
+    StepStarted,
+    ToolCall,
+    ToolResult,
+)
 from agent.loop import RunResult, create_client, run_agent
 from agent.sandbox import Sandbox
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
 PLACEHOLDER_KEY = "your-api-key-here"
+
+TOOL_ICONS = {
+    "get_schema": ":material/table_view:",
+    "run_code": ":material/code:",
+    "save_chart": ":material/bar_chart:",
+    "ask_user": ":material/help:",
+}
+ANSWER_ICON = ":material/check:"
 
 # Code blocks and inline code are shown literally, so $ inside them is left alone.
 CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
@@ -77,6 +98,79 @@ def load_dataset(uploaded: UploadedFile) -> None:
     st.session_state.dataset_path = path
     st.session_state.shape = ast.literal_eval(shape)
     st.session_state.pop("result", None)
+    st.session_state.pop("events", None)
+
+
+class StepRenderer:
+    """Draws agent events as one status block per step.
+
+    Live mode keeps the current step expanded; replay mode draws everything
+    collapsed. Finished steps collapse and are marked complete or failed.
+    """
+
+    def __init__(self, parent: DeltaGenerator, live: bool) -> None:
+        self.parent = parent
+        self.live = live
+        self.box: StatusContainer | None = None
+        self.step = 0
+        self.tools: list[str] = []
+        self.failed = False
+        self.api_error = False
+
+    def __call__(self, event: Event) -> None:
+        match event:
+            case StepStarted(step=step):
+                self._finish()
+                self.step, self.tools, self.failed = step, [], False
+                self.box = self.parent.status(
+                    f"Step {step} · thinking...", expanded=self.live, state="running"
+                )
+            case ApiCallFinished() if self.box:
+                self.box.caption(
+                    f"API call {event.duration_s:.1f} s · tokens in {event.input_tokens:,} "
+                    f"· out {event.output_tokens:,}"
+                )
+            case AssistantText(text=text) if self.box:
+                self.box.markdown(escape_dollars(text))
+            case ToolCall(name=name, input=tool_input) if self.box:
+                self.tools.append(name)
+                self.box.update(label=f"Step {self.step} · {self._what()}")
+                code = tool_input.get("code")
+                if isinstance(code, str):
+                    self.box.code(code, language="python")
+                else:
+                    self.box.code(json.dumps(tool_input, ensure_ascii=False, indent=2), language="json")
+            case ToolResult() if self.box:
+                if event.is_error:
+                    self.failed = True
+                    self.box.error(f"{event.name} failed ({event.duration_s:.1f} s)")
+                self.box.code(event.output, language=None)
+                for image in event.images:
+                    self.box.image(base64.b64decode(image))
+                for path in event.chart_paths:
+                    self.box.image(path, caption=Path(path).name)
+            case RunFinished(result=result):
+                self.api_error = result.status == "api_error"
+                self.failed = self.failed or self.api_error
+                self._finish()
+
+    def _what(self) -> str:
+        """Short description of what the step did, for its label."""
+        if self.tools:
+            return ", ".join(f"{TOOL_ICONS.get(name, '')} {name}" for name in self.tools)
+        if self.api_error:
+            return ":material/error: API error"
+        return f"{ANSWER_ICON} answer"
+
+    def _finish(self) -> None:
+        if self.box is None:
+            return
+        self.box.update(
+            label=f"Step {self.step} · {self._what()}",
+            state="error" if self.failed else "complete",
+            expanded=False,
+        )
+        self.box = None
 
 
 def show_result(result: RunResult) -> None:
@@ -128,18 +222,34 @@ with st.sidebar:
 question = st.text_area("Question", placeholder="Which product categories bring the most revenue?")
 analyze = st.button("Analyze", type="primary", disabled=uploaded is None)
 
-if analyze:
-    if not question.strip():
-        st.warning("Please enter a question.")
-    else:
-        with st.spinner("The agent is analyzing the data..."):
-            st.session_state.result = run_agent(
-                question.strip(),
-                get_sandbox(),
-                get_client(),
-                ask_user_fn=None,
-                dataset_file=str(st.session_state.dataset_path),
-            )
+# Steps are drawn here, above the final answer.
+steps_area = st.container()
+
+if analyze and not question.strip():
+    st.warning("Please enter a question.")
+elif analyze:
+    st.session_state.events = []
+    st.session_state.pop("result", None)
+    renderer = StepRenderer(steps_area, live=True)
+
+    def on_event(event: Event) -> None:
+        # Keep every event so the steps can be redrawn on later reruns.
+        st.session_state.events.append(event)
+        renderer(event)
+
+    with st.spinner("The agent is analyzing the data..."):
+        st.session_state.result = run_agent(
+            question.strip(),
+            get_sandbox(),
+            get_client(),
+            ask_user_fn=None,
+            dataset_file=str(st.session_state.dataset_path),
+            on_event=on_event,
+        )
+elif st.session_state.get("events"):
+    replay = StepRenderer(steps_area, live=False)
+    for saved_event in st.session_state.events:
+        replay(saved_event)
 
 # Kept in session_state so the answer survives later reruns.
 if "result" in st.session_state:

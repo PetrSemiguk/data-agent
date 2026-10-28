@@ -3,7 +3,7 @@
 import base64
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,9 @@ class ToolContext:
     output_dir: Path | None = None
     ask_user_fn: AskUserFn | None = None
     questions_asked: int = 0
+    # Artifacts of the latest tool call, for displaying them; reset on every call.
+    last_images: list[str] = field(default_factory=list)
+    last_chart_paths: list[str] = field(default_factory=list)
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -252,6 +255,7 @@ def run_code(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
         parts.append(result.result)
     if result.images:
         parts.append(f"[{len(result.images)} chart(s) generated]")
+        ctx.last_images = result.images
     if result.error:
         parts.append(result.error)
 
@@ -308,6 +312,7 @@ def save_chart(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]
         name = stem if len(result.images) == 1 else f"{stem}_{index}"
         path = unique_path(output_dir, name)
         path.write_bytes(base64.b64decode(image))
+        ctx.last_chart_paths.append(path.as_posix())
         lines.append(f"Saved chart: {path.as_posix()} ({path.stat().st_size / 1024:.1f} KB)")
     if result.stdout.strip():
         lines.append(result.stdout.rstrip())
@@ -357,6 +362,8 @@ def execute_tool(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> tup
 
     Returns the text to send back to the model and whether it is an error.
     """
+    ctx.last_images = []
+    ctx.last_chart_paths = []
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         available = ", ".join(TOOL_HANDLERS)
