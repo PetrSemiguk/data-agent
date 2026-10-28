@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from agent.config import MAX_OUTPUT_CHARS, OUTPUT_HEAD_CHARS, OUTPUT_TAIL_CHARS
 from agent.sandbox import Sandbox
 
 RUN_CODE_TOOL: dict[str, Any] = {
@@ -31,6 +32,18 @@ RUN_CODE_TOOL: dict[str, Any] = {
 }
 
 
+def truncate_output(text: str) -> str:
+    """Keep the head and tail of a long output so it fits in MAX_OUTPUT_CHARS."""
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    omitted = len(text) - OUTPUT_HEAD_CHARS - OUTPUT_TAIL_CHARS
+    marker = (
+        f"\n... [truncated {omitted} chars] ... "
+        "Tip: print less — use .head(), aggregates or value_counts().\n"
+    )
+    return text[:OUTPUT_HEAD_CHARS] + marker + text[-OUTPUT_TAIL_CHARS:]
+
+
 def execute_tool(name: str, tool_input: dict[str, Any], sandbox: Sandbox) -> tuple[str, bool]:
     """Run a tool requested by the model.
 
@@ -56,4 +69,4 @@ def execute_tool(name: str, tool_input: dict[str, Any], sandbox: Sandbox) -> tup
         parts.append(result.error)
 
     text = "\n".join(parts) if parts else "[code executed, no output]"
-    return text, not result.success
+    return truncate_output(text), not result.success

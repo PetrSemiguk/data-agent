@@ -13,6 +13,8 @@ from typing import Any
 from jupyter_client.blocking.client import BlockingKernelClient
 from jupyter_client.manager import KernelManager
 
+from agent.config import CODE_TIMEOUT_SECONDS, PANDAS_DISPLAY_OPTIONS
+
 # IPython colors tracebacks with ANSI escape codes; the model does not need them.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -44,7 +46,8 @@ class Sandbox:
         """Start a Python kernel and enable inline matplotlib output."""
         # The "python3" kernelspec comes from ipykernel inside .venv; jupyter_client
         # replaces its "python" command with sys.executable, i.e. the venv Python.
-        self._km = KernelManager(kernel_name="python3")
+        # Encrypt kernel traffic with CurveZMQ; fail loudly if that is impossible.
+        self._km = KernelManager(kernel_name="python3", transport_encryption="required")
         self._km.start_kernel()
         self._kc = self._km.client()
         self._kc.start_channels()
@@ -72,7 +75,7 @@ class Sandbox:
         self._df_path = path
         return result
 
-    def execute(self, code: str, timeout: float = 30) -> ExecutionResult:
+    def execute(self, code: str, timeout: float = CODE_TIMEOUT_SECONDS) -> ExecutionResult:
         """Run code in the kernel and collect its output until the kernel is idle."""
         kc = self._client()
         msg_id = kc.execute(code)
@@ -167,7 +170,11 @@ class Sandbox:
         return self._kc
 
     def _setup_kernel(self) -> None:
-        result = self.execute("%matplotlib inline")
+        # Compact pandas output is the first defense against huge tool results.
+        options = "\n".join(
+            f"pd.set_option({name!r}, {value!r})" for name, value in PANDAS_DISPLAY_OPTIONS.items()
+        )
+        result = self.execute(f"%matplotlib inline\nimport pandas as pd\n{options}")
         if not result.success:
             raise RuntimeError(f"Kernel setup failed:\n{result.error}")
 
