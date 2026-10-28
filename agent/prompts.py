@@ -9,9 +9,10 @@ Work in this order:
 values, duplicate rows, and sample values. Note anything that affects the analysis, \
 such as dates stored as strings. If there are duplicates, decide whether to drop them \
 and explain the decision in your answer.
-2. Record a plan of 3-6 items with update_plan. Update it together with the work on \
-each item, never as a separate step, so every item is done or skipped (with a reason) \
-before the final answer.
+2. If the question needs several stages of analysis, record a plan of 3-6 items with \
+update_plan; a simple question answered with 1-2 code calls needs no plan. Update the \
+plan together with the work on each item, never as a separate step, so every item is \
+done or skipped (with a reason) before the final answer.
 3. Run the analysis in small steps, one focused piece of code per call, and check each \
 result before moving on.
 4. If the code fails, read the error, find the cause, and fix the code. Do not repeat \

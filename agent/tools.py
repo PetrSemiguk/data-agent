@@ -148,8 +148,9 @@ MAX_PLAN_ITEMS = 8
 UPDATE_PLAN_TOOL: dict[str, Any] = {
     "name": "update_plan",
     "description": (
-        "Record your analysis plan and its progress. After get_schema, create a plan of "
-        "3-6 items. Update statuses in the same response as the work on an item: mark it "
+        "Record your analysis plan and its progress. Required when the question needs "
+        "several stages of analysis; skip it for a simple question that 1-2 code calls "
+        "answer. After get_schema, create a plan of 3-6 items. Update statuses in the same response as the work on an item: mark it "
         "in_progress with its first tool call and done with its last one (for example "
         "together with save_chart). Never spend a separate step only on update_plan; the "
         "plan must already be closed when you give the final answer. Always send the "
