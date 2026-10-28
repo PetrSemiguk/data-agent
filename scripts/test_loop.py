@@ -14,7 +14,7 @@ import httpx2
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.config import MAX_TOTAL_TOKENS, OUTPUTS_DIR  # noqa: E402
+from agent.config import MAX_TOTAL_TOKENS, MAX_USER_QUESTIONS, OUTPUTS_DIR  # noqa: E402
 from agent.events import (  # noqa: E402
     ApiCallFinished,
     AssistantText,
@@ -27,7 +27,8 @@ from agent.events import (  # noqa: E402
     ToolCall,
     ToolResult,
 )
-from agent.loop import RunResult, run_agent  # noqa: E402
+from agent.loop import RunResult, resume_agent, run_agent  # noqa: E402
+from agent.tools import QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
 passed = 0
@@ -59,6 +60,19 @@ def tool_use(code: str, block_id: str = "toolu_1") -> Any:
 
 def text(value: str) -> Any:
     return SimpleNamespace(type="text", text=value)
+
+
+def ask(question: str, options: list[str] | None = None, block_id: str = "toolu_ask") -> Any:
+    tool_input: dict[str, Any] = {"question": question}
+    if options:
+        tool_input["options"] = options
+    return SimpleNamespace(type="tool_use", id=block_id, name="ask_user", input=tool_input)
+
+
+def last_tool_results(client: "FakeClient", call: int) -> list[dict[str, Any]]:
+    """tool_result blocks the model received on API call number `call` (1-based)."""
+    content = client.requests[call - 1][-1]["content"]
+    return [block for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
 
 
 def api_error(cls: type[anthropic.APIStatusError], status: int, message: str) -> anthropic.APIStatusError:
@@ -129,10 +143,13 @@ class FakeClient:
         self.replies = list(replies or [])
         self.repeat = repeat
         self.calls = 0
+        self.requests: list[list[Any]] = []
         self.messages = self
 
     def stream(self, **kwargs: Any) -> FakeStream:
         self.calls += 1
+        # A copy of what the model would see on this call.
+        self.requests.append(list(kwargs["messages"]))
         reply = self.replies.pop(0) if self.replies else self.repeat
         return FakeStream(reply)
 
@@ -258,6 +275,67 @@ def main() -> int:
         report("k) mid-stream permanent error -> api_error",
                result.status == "api_error" and resets == 0 and client.calls == 1,
                f"status={result.status}, API calls={client.calls}; {result.error_message}")
+
+        # l) ask_user pauses the run; resume with an answer completes it, in one log
+        client = FakeClient([
+            make_response([ask("Gross or net revenue?", ["Gross", "Net"])], "tool_use"),
+            make_response([text("Net revenue is 10.")], "end_turn"),
+        ])
+        events = []
+        paused = run_agent("Revenue?", sb, client, on_event=events.append, pause_on_ask=True)  # type: ignore[arg-type]
+        waiting_ok = (paused.status == "waiting_for_user" and paused.question == "Gross or net revenue?"
+                      and paused.options == ["Gross", "Net"] and paused.state is not None)
+        final = resume_agent(paused.state, "2", sb, client, on_event=events.append)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        log = read_log(final)
+        report("l) pause -> resume -> completed",
+               waiting_ok and final.status == "completed"
+               and [r["content"] for r in results] == ["User answered: Net"]
+               and final.log_path == paused.log_path and final.steps == 2
+               and log is not None and log["status"] == "completed" and len(log["steps"]) == 2
+               and log["steps"][0]["tool_calls"][0]["output"] == "User answered: Net"
+               and [e.step for e in events if isinstance(e, StepStarted)] == [1, 2],
+               f"paused={paused.status} ({paused.question!r}), final={final.status}, "
+               f"model got {[r['content'] for r in results]}, log steps={len(log['steps']) if log else '-'}")
+        cleanup(final)
+
+        # m) run_code and ask_user in one answer: both results go back together, in order
+        client = FakeClient([
+            make_response([tool_use("print(2 + 2)", "toolu_code"), ask("Which year?", block_id="toolu_ask")],
+                          "tool_use"),
+            make_response([text("Done.")], "end_turn"),
+        ])
+        paused = run_agent("Q", sb, client, pause_on_ask=True)  # type: ignore[arg-type]
+        ran_before_pause = len(paused.state.pending_tool_results) == 2 if paused.state else False
+        final = resume_agent(paused.state, "2011", sb, client)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        report("m) tool results sent together",
+               ran_before_pause and final.status == "completed"
+               and [r["tool_use_id"] for r in results] == ["toolu_code", "toolu_ask"]
+               and results[0]["content"].startswith("4") and results[1]["content"] == "User answered: 2011"
+               and len(client.requests[1][-1]["content"]) == 2,
+               f"ids={[r['tool_use_id'] for r in results]}, contents="
+               f"{[r['content'].splitlines()[0] for r in results]}")
+        cleanup(final)
+
+        # n) The question limit counts across resumes
+        client = FakeClient([
+            make_response([ask("First?", block_id="a1")], "tool_use"),
+            make_response([ask("Second?", block_id="a2")], "tool_use"),
+            make_response([ask("Third?", block_id="a3")], "tool_use"),
+            make_response([text("Final.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client, pause_on_ask=True)  # type: ignore[arg-type]
+        pauses = 0
+        while result.status == "waiting_for_user" and result.state is not None:
+            pauses += 1
+            result = resume_agent(result.state, "", sb, client)  # type: ignore[arg-type]
+        third = last_tool_results(client, 4)
+        report("n) question limit across resumes",
+               pauses == MAX_USER_QUESTIONS and result.status == "completed"
+               and third[0]["content"].startswith(QUESTION_LIMIT_REACHED),
+               f"pauses={pauses}, third question got: {third[0]['content'].splitlines()[0]!r}")
+        cleanup(result)
 
         # g) A crashing event handler does not break the run
         def broken_handler(event: Event) -> None:

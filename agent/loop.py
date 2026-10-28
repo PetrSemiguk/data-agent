@@ -31,10 +31,21 @@ from agent.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    UserAnswered,
+    UserQuestion,
 )
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
-from agent.tools import TOOLS, AskUserFn, ToolContext, execute_tool
+from agent.tools import (
+    ASK_USER_TOOL,
+    TOOLS,
+    AskUserFn,
+    ToolContext,
+    answer_for_model,
+    check_ask_user,
+    execute_tool,
+    resolve_answer,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
@@ -45,12 +56,64 @@ STREAM_BROKEN_ERRORS = (httpx2.TransportError, anthropic.APIConnectionError)
 TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
 STREAM_RETRY_BASE_DELAY_S = 0.5
 
-RunStatus = Literal["running", "completed", "max_steps", "budget_exceeded", "api_error", "stopped"]
+RunStatus = Literal[
+    "running",
+    "completed",
+    "max_steps",
+    "budget_exceeded",
+    "api_error",
+    "stopped",
+    "waiting_for_user",
+]
+
+
+@dataclass
+class PendingQuestion:
+    """An ask_user call the run is paused on."""
+
+    tool_use_id: str
+    question: str
+    options: list[str] | None
+    # The JSON-log entry of this call, completed when the answer arrives.
+    log_entry: dict[str, Any]
+
+
+@dataclass
+class AgentState:
+    """Everything needed to continue a run later: conversation, counters, log.
+
+    Kept by the caller between `run_agent` and `resume_agent` (the web UI keeps
+    it in st.session_state). It lives in memory only and is not saved to disk.
+    """
+
+    run_id: str
+    output_dir: Path
+    log_path: Path
+    log: dict[str, Any]
+    model: str
+    max_steps: int
+    messages: list[dict[str, Any]]
+    step: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    api_seconds: float = 0.0
+    code_seconds: float = 0.0
+    # Time the agent actually worked; waiting for the human is not counted.
+    active_seconds: float = 0.0
+    questions_asked: int = 0
+    # Results of the other tools from the step that asked; sent with the answer.
+    pending_tool_results: list[dict[str, Any]] = field(default_factory=list)
+    pending_question: PendingQuestion | None = None
+    charts: list[str] = field(default_factory=list)
 
 
 @dataclass
 class RunResult:
-    """Outcome of one agent run; returned instead of raising on API problems."""
+    """Outcome of one agent run; returned instead of raising on API problems.
+
+    With status "waiting_for_user" the run is paused: show `question` and
+    `options` to the human, then call `resume_agent(state, answer, ...)`.
+    """
 
     status: RunStatus
     final_answer: str | None
@@ -61,6 +124,9 @@ class RunResult:
     duration_s: float
     charts: list[str] = field(default_factory=list)
     log_path: str | None = None
+    question: str | None = None
+    options: list[str] | None = None
+    state: AgentState | None = None
 
 
 def create_client() -> anthropic.Anthropic:
@@ -77,84 +143,134 @@ def run_agent(
     ask_user_fn: AskUserFn | None = None,
     dataset_file: str | None = None,
     on_event: EventHandler | None = None,
+    pause_on_ask: bool = False,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
-    `ask_user_fn` lets the agent ask the human a clarifying question; with None
-    the agent is told the user is not available and must make assumptions.
+    How the agent's clarifying questions (ask_user) are answered:
+    - `ask_user_fn` given: it is called and blocks until the human answers (console);
+    - `pause_on_ask=True`: the run returns status "waiting_for_user" and is
+      continued with `resume_agent` (web UI, which cannot block);
+    - neither: the agent is told the user is not available and must assume.
     `on_event` receives progress events; the loop itself prints nothing.
     API errors do not raise: they end the run with status "api_error".
     """
-
-    def emit(event: Event) -> None:
-        # A broken display must never stop the analysis.
-        if on_event is None:
-            return
-        try:
-            on_event(event)
-        except Exception:
-            logger.exception("Event handler failed on %s", type(event).__name__)
-
-    messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
-    input_tokens = 0
-    output_tokens = 0
-    api_seconds = 0.0
-    code_seconds = 0.0
-    run_start = time.perf_counter()
-
-    status: RunStatus = "running"
-    final_answer: str | None = None
-    error_message: str | None = None
+    emit = safe_emitter(on_event)
 
     # Every run saves its files (charts) and its log under the same run id.
     run_dir = create_run_dir()
-    run_id = run_dir.name
-    log_path = PROJECT_ROOT / LOGS_DIR / f"{run_id}.json"
+    log_path = PROJECT_ROOT / LOGS_DIR / f"{run_dir.name}.json"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    ctx = ToolContext(sandbox=sandbox, output_dir=run_dir, ask_user_fn=ask_user_fn)
-    emit(RunStarted(run_id=run_id, output_dir=run_dir.as_posix(), log_path=log_path.as_posix()))
+    state = AgentState(
+        run_id=run_dir.name,
+        output_dir=run_dir,
+        log_path=log_path,
+        model=model,
+        max_steps=max_steps,
+        messages=[{"role": "user", "content": question}],
+        log={
+            "run_id": run_dir.name,
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+            "finished_at": None,
+            "model": model,
+            "dataset_file": dataset_file,
+            "question": question,
+            "status": "running",
+            "error_message": None,
+            "final_answer": None,
+            "totals": {},
+            "charts": [],
+            "steps": [],
+        },
+    )
+    emit(RunStarted(run_id=state.run_id, output_dir=run_dir.as_posix(), log_path=log_path.as_posix()))
+    write_log(log_path, state.log)
+    return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
 
-    step_logs: list[dict[str, Any]] = []
-    log: dict[str, Any] = {
-        "run_id": run_id,
-        "started_at": datetime.now().isoformat(timespec="seconds"),
-        "finished_at": None,
-        "model": model,
-        "dataset_file": dataset_file,
-        "question": question,
-        "status": status,
-        "error_message": None,
-        "final_answer": None,
-        "totals": {},
-        "charts": [],
-        "steps": step_logs,
-    }
-    write_log(log_path, log)
+
+def resume_agent(
+    state: AgentState,
+    answer: str,
+    sandbox: Sandbox,
+    client: anthropic.Anthropic,
+    on_event: EventHandler | None = None,
+) -> RunResult:
+    """Continue a run paused on a question; an empty answer lets the agent decide.
+
+    Uses the same run id, log, step numbers and limits as the original run.
+    """
+    pending = state.pending_question
+    if pending is None:
+        raise ValueError("This run is not waiting for an answer.")
+    emit = safe_emitter(on_event)
+
+    resolved = resolve_answer(answer, pending.options)
+    output = answer_for_model(resolved)
+    for tool_result in state.pending_tool_results:
+        if tool_result["tool_use_id"] == pending.tool_use_id:
+            tool_result["content"] = output
+    pending.log_entry["output"] = output
+    emit(UserAnswered(step=state.step, question=pending.question, answer=resolved))
+
+    # All results of that step, the answer included, go back in one message.
+    state.messages.append({"role": "user", "content": state.pending_tool_results})
+    state.pending_tool_results = []
+    state.pending_question = None
+    write_log(state.log_path, state.log)
+    return continue_run(state, sandbox, client, emit, None, pause_on_ask=True)
+
+
+def continue_run(
+    state: AgentState,
+    sandbox: Sandbox,
+    client: anthropic.Anthropic,
+    emit: EventHandler,
+    ask_user_fn: AskUserFn | None,
+    pause_on_ask: bool,
+) -> RunResult:
+    """Run steps until the run finishes or pauses for a question."""
+    segment_start = time.perf_counter()
+    status: RunStatus = "running"
+    final_answer: str | None = None
+    error_message: str | None = None
+    ctx = ToolContext(
+        sandbox=sandbox,
+        output_dir=state.output_dir,
+        ask_user_fn=ask_user_fn,
+        questions_asked=state.questions_asked,
+    )
+    step_logs: list[dict[str, Any]] = state.log["steps"]
 
     try:
-        for step in range(1, max_steps + 1):
+        while True:
+            if state.step >= state.max_steps:
+                status = "max_steps"
+                error_message = f"Reached the limit of {state.max_steps} steps without a final answer."
+                break
             # Stop before spending more once the budget is used up.
-            if input_tokens + output_tokens >= MAX_TOTAL_TOKENS:
+            if state.input_tokens + state.output_tokens >= MAX_TOTAL_TOKENS:
                 status = "budget_exceeded"
                 error_message = (
-                    f"Token budget exceeded: {input_tokens + output_tokens} tokens used, "
-                    f"limit is {MAX_TOTAL_TOKENS}."
+                    f"Token budget exceeded: {state.input_tokens + state.output_tokens} tokens "
+                    f"used, limit is {MAX_TOTAL_TOKENS}."
                 )
                 break
 
+            state.step += 1
+            step = state.step
             emit(StepStarted(step=step))
             start = time.perf_counter()
             try:
-                response = stream_message(client, model, messages, step, emit)
+                response = stream_message(client, state.model, state.messages, step, emit)
             except (anthropic.AnthropicError, *STREAM_BROKEN_ERRORS) as exc:
-                api_seconds += time.perf_counter() - start
+                state.api_seconds += time.perf_counter() - start
                 status = "api_error"
-                error_message = describe_api_error(exc, model)
+                error_message = describe_api_error(exc, state.model)
                 break
             elapsed = time.perf_counter() - start
-            api_seconds += elapsed
-            input_tokens += response.usage.input_tokens
-            output_tokens += response.usage.output_tokens
+            state.api_seconds += elapsed
+            state.input_tokens += response.usage.input_tokens
+            state.output_tokens += response.usage.output_tokens
             emit(
                 ApiCallFinished(
                     step=step,
@@ -175,7 +291,7 @@ def run_agent(
             step_logs.append(step_log)
 
             # Keep the whole assistant turn, including tool_use blocks.
-            messages.append({"role": "assistant", "content": response.content})
+            state.messages.append({"role": "assistant", "content": response.content})
             for block in response.content:
                 if block.type == "text" and block.text.strip():
                     emit(AssistantText(step=step, text=block.text.strip()))
@@ -193,15 +309,44 @@ def run_agent(
                 final_answer = extract_text(response.content) or None
                 break
 
-            # Run every requested tool and send all results back in one message.
+            # Run every requested tool. A question for the human is held back
+            # (its slot keeps the order) and the other tools still run first.
             tool_results: list[dict[str, Any]] = []
+            pending: PendingQuestion | None = None
             for block in response.content:
                 if block.type != "tool_use":
                     continue
-                start = time.perf_counter()
-                output, is_error = execute_tool(block.name, block.input, ctx)
-                elapsed = time.perf_counter() - start
-                code_seconds += elapsed
+                if block.name == ASK_USER_TOOL["name"] and pause_on_ask and ask_user_fn is None:
+                    rejected = check_ask_user(block.input, ctx)
+                    if rejected is None and pending is not None:
+                        rejected = ("Only one question at a time. Ask again after the answer.", True)
+                    if rejected is None:
+                        ctx.questions_asked += 1
+                        log_entry = {
+                            "name": block.name,
+                            "input": block.input,
+                            "output": None,
+                            "is_error": False,
+                            "duration_s": 0.0,
+                        }
+                        step_log["tool_calls"].append(log_entry)
+                        tool_results.append(
+                            {"type": "tool_result", "tool_use_id": block.id, "content": None, "is_error": False}
+                        )
+                        pending = PendingQuestion(
+                            tool_use_id=block.id,
+                            question=block.input["question"],
+                            options=block.input.get("options"),
+                            log_entry=log_entry,
+                        )
+                        continue
+                    output, is_error = rejected
+                    elapsed = 0.0
+                else:
+                    start = time.perf_counter()
+                    output, is_error = execute_tool(block.name, block.input, ctx)
+                    elapsed = time.perf_counter() - start
+                    state.code_seconds += elapsed
                 # Let the model see slow operations.
                 output = f"{output}\n[executed in {elapsed:.1f}s]"
                 emit(
@@ -232,45 +377,75 @@ def run_agent(
                         "duration_s": round(elapsed, 2),
                     }
                 )
-            messages.append({"role": "user", "content": tool_results})
+
+            if pending is not None:
+                state.pending_tool_results = tool_results
+                state.pending_question = pending
+                status = "waiting_for_user"
+                emit(UserQuestion(step=step, question=pending.question, options=pending.options))
+                break
+
+            state.messages.append({"role": "user", "content": tool_results})
             # Save after every step so a crash still leaves a record.
-            write_log(log_path, log)
-        else:
-            status = "max_steps"
-            error_message = f"Reached the limit of {max_steps} steps without a final answer."
+            write_log(state.log_path, state.log)
     finally:
-        duration_s = time.perf_counter() - run_start
-        charts = [chart.as_posix() for chart in sorted(run_dir.glob("*.png"))]
-        log.update(
+        state.questions_asked = ctx.questions_asked
+        state.active_seconds += time.perf_counter() - segment_start
+        state.charts = [chart.as_posix() for chart in sorted(state.output_dir.glob("*.png"))]
+        state.log.update(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
             error_message=error_message,
             final_answer=final_answer,
-            charts=charts,
+            charts=state.charts,
             totals={
                 "steps": len(step_logs),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "duration_s": round(duration_s, 2),
-                "api_duration_s": round(api_seconds, 2),
-                "code_duration_s": round(code_seconds, 2),
+                "input_tokens": state.input_tokens,
+                "output_tokens": state.output_tokens,
+                "duration_s": round(state.active_seconds, 2),
+                "api_duration_s": round(state.api_seconds, 2),
+                "code_duration_s": round(state.code_seconds, 2),
             },
         )
-        write_log(log_path, log)
+        write_log(state.log_path, state.log)
+        waiting = status == "waiting_for_user" and state.pending_question is not None
         result = RunResult(
             status=status,
             final_answer=final_answer,
             error_message=error_message,
             steps=len(step_logs),
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            duration_s=round(duration_s, 2),
-            charts=charts,
-            log_path=log_path.as_posix(),
+            input_tokens=state.input_tokens,
+            output_tokens=state.output_tokens,
+            duration_s=round(state.active_seconds, 2),
+            charts=state.charts,
+            log_path=state.log_path.as_posix(),
+            question=state.pending_question.question if waiting else None,
+            options=state.pending_question.options if waiting else None,
+            state=state if waiting else None,
         )
-        emit(RunFinished(result=result, api_duration_s=api_seconds, code_duration_s=code_seconds))
+        emit(
+            RunFinished(
+                result=result,
+                api_duration_s=state.api_seconds,
+                code_duration_s=state.code_seconds,
+            )
+        )
 
     return result
+
+
+def safe_emitter(on_event: EventHandler | None) -> EventHandler:
+    """Wrap an event handler so that a broken display never stops the analysis."""
+
+    def emit(event: Event) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:
+            logger.exception("Event handler failed on %s", type(event).__name__)
+
+    return emit
 
 
 def stream_message(

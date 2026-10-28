@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import anthropic
@@ -26,8 +27,9 @@ from agent.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    UserAnswered,
 )
-from agent.loop import RunResult, create_client, run_agent
+from agent.loop import RunResult, create_client, resume_agent, run_agent
 from agent.sandbox import Sandbox
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -165,7 +167,10 @@ class StepRenderer:
                 self.tools.append(name)
                 self.box.update(label=f"Step {self.step} · {self._what()}")
                 code = tool_input.get("code")
-                if isinstance(code, str):
+                if name == "ask_user":
+                    options = "".join(f"\n- {option}" for option in tool_input.get("options") or [])
+                    self.box.markdown(escape_dollars(f"**Question:** {tool_input.get('question')}{options}"))
+                elif isinstance(code, str):
                     self.box.code(code, language="python")
                 else:
                     self.box.code(json.dumps(tool_input, ensure_ascii=False, indent=2), language="json")
@@ -178,6 +183,12 @@ class StepRenderer:
                     self.box.image(base64.b64decode(image))
                 for path in event.chart_paths:
                     self.box.image(path, caption=Path(path).name)
+            case UserAnswered(question=question, answer=answer):
+                # The question and the human's answer stay visible between the steps.
+                shown = answer or "_left to the agent_"
+                self.parent.container(border=True).markdown(
+                    escape_dollars(f":material/help: **Question** · {question}\n\n**Your answer:** {shown}")
+                )
             case RunFinished(result=result):
                 self.api_error = result.status == "api_error"
                 self.failed = self.failed or self.api_error
@@ -208,6 +219,26 @@ class StepRenderer:
             expanded=False,
         )
         self.box = None
+
+
+def ask_question(slot: DeltaGenerator, result: RunResult) -> str | None:
+    """Show the agent's question; return the answer once given ("" = agent decides)."""
+    # Keys change with every question so old input does not carry over.
+    key = f"q{result.state.questions_asked if result.state else 0}"
+    answer: str | None = None
+    with slot.container(border=True):
+        st.info(escape_dollars(f"The agent asks: {result.question}"), icon=":material/help:")
+        options = result.options or []
+        for column, (index, option) in zip(st.columns(len(options) or 1), enumerate(options)):
+            if column.button(escape_dollars(option), key=f"{key}_option_{index}", use_container_width=True):
+                answer = option
+        other = st.text_input("Other answer", key=f"{key}_other")
+        send, decide = st.columns(2)
+        if send.button("Send answer", key=f"{key}_send", disabled=not other.strip()):
+            answer = other.strip()
+        if decide.button("Let the agent decide", key=f"{key}_decide"):
+            answer = ""
+    return answer
 
 
 def show_result(result: RunResult) -> None:
@@ -256,40 +287,71 @@ with st.sidebar:
         st.write(f"**{uploaded.name}**")
         st.caption(f"{uploaded.size / 1024 / 1024:.2f} MB · {rows:,} rows · {cols} columns")
 
-question = st.text_area("Question", placeholder="Which product categories bring the most revenue?")
-analyze = st.button("Analyze", type="primary", disabled=uploaded is None)
+previous: RunResult | None = st.session_state.get("result")
+waiting = previous is not None and previous.status == "waiting_for_user"
 
-# Steps are drawn here, above the final answer.
+question = st.text_area("Question", placeholder="Which product categories bring the most revenue?")
+analyze = st.button("Analyze", type="primary", disabled=uploaded is None or waiting)
+
+# Steps are drawn here, above the question widget and the final answer.
 steps_area = st.container()
+question_slot = st.empty()
+answer = ask_question(question_slot, previous) if waiting and previous else None
+
+
+def live_handler(renderer: StepRenderer) -> Callable[[Event], None]:
+    """Draw events as they come and keep them for redrawing on later reruns."""
+
+    def on_event(event: Event) -> None:
+        # Deltas are not kept: AssistantText carries the full text.
+        if not isinstance(event, (TextDelta, StreamReset)):
+            st.session_state.events.append(event)
+        renderer(event)
+
+    return on_event
+
+
+def replay_events() -> None:
+    replay = StepRenderer(steps_area, live=False)
+    for saved_event in st.session_state.get("events", []):
+        replay(saved_event)
+
 
 if analyze and not question.strip():
     st.warning("Please enter a question.")
 elif analyze:
     st.session_state.events = []
     st.session_state.pop("result", None)
-    renderer = StepRenderer(steps_area, live=True)
-
-    def on_event(event: Event) -> None:
-        # Keep events so the steps can be redrawn on later reruns; deltas are
-        # not needed for that, because AssistantText carries the full text.
-        if not isinstance(event, (TextDelta, StreamReset)):
-            st.session_state.events.append(event)
-        renderer(event)
-
     with st.spinner("The agent is analyzing the data..."):
         st.session_state.result = run_agent(
             question.strip(),
             get_sandbox(),
             get_client(),
-            ask_user_fn=None,
             dataset_file=str(st.session_state.dataset_path),
-            on_event=on_event,
+            on_event=live_handler(StepRenderer(steps_area, live=True)),
+            pause_on_ask=True,
         )
-elif st.session_state.get("events"):
-    replay = StepRenderer(steps_area, live=False)
-    for saved_event in st.session_state.events:
-        replay(saved_event)
+elif answer is not None and previous and previous.state:
+    # The human answered: redraw earlier steps, then continue the same run live.
+    replay_events()
+    question_slot.empty()
+    with st.spinner("The agent continues with your answer..."):
+        st.session_state.result = resume_agent(
+            previous.state,
+            answer,
+            get_sandbox(),
+            get_client(),
+            on_event=live_handler(StepRenderer(steps_area, live=True)),
+        )
+else:
+    replay_events()
+
+if (analyze and question.strip()) or answer is not None:
+    # Rerun once so the page is rebuilt from the new state: the question widget
+    # appears (or disappears) and the Analyze button gets the right state.
+    st.rerun()
 
 # Kept in session_state so the answer survives later reruns.
-if "result" in st.session_state:
-    show_result(st.session_state.result)
+result: RunResult | None = st.session_state.get("result")
+if result and result.status != "waiting_for_user":
+    show_result(result)

@@ -319,8 +319,12 @@ def save_chart(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]
     return "\n".join(lines), False
 
 
-def ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
-    """Pass a clarifying question to the human, within the per-run limit."""
+def check_ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool] | None:
+    """Reply for an ask_user call that must not reach the human, or None if it may.
+
+    Covers invalid input and the per-run question limit. Used both here and by the
+    agent loop when it pauses the run to wait for an answer.
+    """
     question = tool_input.get("question")
     if not isinstance(question, str) or not question.strip():
         return "Missing required input: question (a non-empty string).", True
@@ -331,20 +335,36 @@ def ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
         or not all(isinstance(option, str) for option in options)
     ):
         return "Invalid input: options must be a list of 2-4 strings.", True
-
-    if ctx.ask_user_fn is None:
-        return USER_UNAVAILABLE, False
     if ctx.questions_asked >= MAX_USER_QUESTIONS:
         return QUESTION_LIMIT_REACHED, False
+    return None
+
+
+def resolve_answer(answer: str, options: list[str] | None) -> str:
+    """Clean the human's answer; an option number becomes the option text."""
+    answer = answer.strip()
+    if options and answer.isdigit() and 1 <= int(answer) <= len(options):
+        return options[int(answer) - 1]
+    return answer
+
+
+def answer_for_model(resolved: str) -> str:
+    """Tool result text for an answer; empty means the user left it to the agent."""
+    return f"User answered: {resolved}" if resolved else NO_ANSWER
+
+
+def ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Pass a clarifying question to the human, within the per-run limit."""
+    rejected = check_ask_user(tool_input, ctx)
+    if rejected is not None:
+        return rejected
+    if ctx.ask_user_fn is None:
+        return USER_UNAVAILABLE, False
 
     ctx.questions_asked += 1
-    answer = ctx.ask_user_fn(question, options).strip()
-    if not answer:
-        return NO_ANSWER, False
-    # Turn "2" into the text of option 2 so the model sees the actual choice.
-    if options and answer.isdigit() and 1 <= int(answer) <= len(options):
-        answer = options[int(answer) - 1]
-    return f"User answered: {answer}", False
+    options = tool_input.get("options")
+    answer = ctx.ask_user_fn(tool_input["question"], options)
+    return answer_for_model(resolve_answer(answer, options)), False
 
 
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]

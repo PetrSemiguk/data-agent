@@ -70,7 +70,27 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class UserQuestion:
+    """The run pauses: the agent waits for the human to answer this question."""
+
+    step: int
+    question: str
+    options: list[str] | None
+
+
+@dataclass(frozen=True)
+class UserAnswered:
+    """The run resumes with the human's answer; empty means "let the agent decide"."""
+
+    step: int
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
 class RunFinished:
+    """Sent when a run ends and also when it pauses for a question."""
+
     result: RunResult
     api_duration_s: float
     code_duration_s: float
@@ -85,6 +105,8 @@ Event = (
     | AssistantText
     | ToolCall
     | ToolResult
+    | UserQuestion
+    | UserAnswered
     | RunFinished
 )
 EventHandler = Callable[[Event], None]

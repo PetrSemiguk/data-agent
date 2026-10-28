@@ -13,6 +13,8 @@ from agent.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    UserAnswered,
+    UserQuestion,
 )
 
 SEPARATOR = "-" * 80
@@ -61,6 +63,10 @@ class ConsolePrinter:
                     print(f"[Tool: {name}] args: {json.dumps(tool_input)}")
             case ToolResult(output=output, is_error=is_error):
                 print(f"[{'Error' if is_error else 'Result'}]\n{output}")
+            case UserQuestion(question=question):
+                print(f"[Waiting for the user] {question}")
+            case UserAnswered(answer=answer):
+                print(f"[User answered] {answer or '(left to the agent)'}")
             case RunFinished(result=result):
                 self._end_line()
                 if result.status == "api_error":
