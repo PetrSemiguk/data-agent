@@ -1,0 +1,31 @@
+# Secrets: NEVER commit
+.env
+.env.*
+!.env.example
+
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data (datasets are not stored in git)
+data/*
+!data/.gitkeep
+
+# Agent artifacts
+outputs/
+logs/
+*.db
+*.sqlite
+
+# Editor / OS
+.vscode/
+Thumbs.db
+
+# Local Claude Code settings
+.claude/settings.local.json
