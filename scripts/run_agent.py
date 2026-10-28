@@ -34,6 +34,8 @@ def main() -> int:
         help="Never ask the user; the agent must make and state its own assumptions",
     )
     args = parser.parse_args()
+    # Symbols such as ✔ may not exist in the console encoding; print '?' instead of failing.
+    sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
 
     # Does not override variables already set in the environment.
     load_dotenv()

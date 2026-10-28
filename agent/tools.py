@@ -30,6 +30,8 @@ class ToolContext:
     # Artifacts of the latest tool call, for displaying them; reset on every call.
     last_images: list[str] = field(default_factory=list)
     last_chart_paths: list[str] = field(default_factory=list)
+    # The agent's current analysis plan, replaced as a whole by update_plan.
+    plan: list[dict[str, str]] | None = None
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -140,7 +142,52 @@ ASK_USER_TOOL: dict[str, Any] = {
     },
 }
 
-TOOLS: list[dict[str, Any]] = [GET_SCHEMA_TOOL, RUN_CODE_TOOL, SAVE_CHART_TOOL, ASK_USER_TOOL]
+PLAN_STATUSES = ("pending", "in_progress", "done", "skipped")
+MAX_PLAN_ITEMS = 8
+
+UPDATE_PLAN_TOOL: dict[str, Any] = {
+    "name": "update_plan",
+    "description": (
+        "Record your analysis plan and its progress. After get_schema, create a plan of "
+        "3-6 items; then update the statuses as you work. Always send the WHOLE plan, "
+        "not only the changed items. Mark an item 'skipped' only with the reason in "
+        "'note'. Call update_plan in the same response as your other tool calls "
+        "(for example together with run_code), not as a separate step. "
+        "This tool runs no code; it only stores the plan."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_PLAN_ITEMS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Short stable id, e.g. '1'."},
+                        "text": {"type": "string", "description": "What this step does."},
+                        "status": {"type": "string", "enum": list(PLAN_STATUSES)},
+                        "note": {
+                            "type": "string",
+                            "description": "Optional; required when status is 'skipped'.",
+                        },
+                    },
+                    "required": ["id", "text", "status"],
+                },
+            },
+        },
+        "required": ["items"],
+    },
+}
+
+TOOLS: list[dict[str, Any]] = [
+    GET_SCHEMA_TOOL,
+    UPDATE_PLAN_TOOL,
+    RUN_CODE_TOOL,
+    SAVE_CHART_TOOL,
+    ASK_USER_TOOL,
+]
 
 USER_UNAVAILABLE = (
     "User is not available. Proceed with the most reasonable assumption "
@@ -367,10 +414,58 @@ def ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     return answer_for_model(resolve_answer(answer, options)), False
 
 
+def validate_plan(items: Any) -> list[str]:
+    """Problems with a plan sent to update_plan; an empty list means it is valid."""
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_PLAN_ITEMS:
+        return [f"items must be a list of 1-{MAX_PLAN_ITEMS} plan items."]
+    problems: list[str] = []
+    seen: set[str] = set()
+    for position, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"item {position} must be an object.")
+            continue
+        item_id, text, status = item.get("id"), item.get("text"), item.get("status")
+        if not isinstance(item_id, str) or not item_id.strip():
+            problems.append(f"item {position} needs a non-empty 'id'.")
+        elif item_id in seen:
+            problems.append(f"duplicate id '{item_id}'.")
+        else:
+            seen.add(item_id)
+        if not isinstance(text, str) or not text.strip():
+            problems.append(f"item {position} needs a non-empty 'text'.")
+        if status not in PLAN_STATUSES:
+            problems.append(f"item {position} has invalid status {status!r}; use one of {', '.join(PLAN_STATUSES)}.")
+        note = item.get("note")
+        if status == "skipped" and not (isinstance(note, str) and note.strip()):
+            problems.append(f"item {position} is 'skipped' without a reason in 'note'.")
+    return problems
+
+
+def plan_summary(plan: list[dict[str, str]]) -> str:
+    """Short progress line such as '2/5 done, 1 skipped'."""
+    done = sum(item["status"] == "done" for item in plan)
+    skipped = sum(item["status"] == "skipped" for item in plan)
+    return f"{done}/{len(plan)} done" + (f", {skipped} skipped" if skipped else "")
+
+
+def update_plan(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Replace the stored plan with the one the model sent."""
+    items = tool_input.get("items")
+    problems = validate_plan(items)
+    if problems:
+        return "Plan not updated: " + " ".join(problems) + " Send the whole plan again.", True
+    ctx.plan = [
+        {key: str(item[key]).strip() for key in ("id", "text", "status", "note") if item.get(key)}
+        for item in items
+    ]
+    return f"Plan updated: {plan_summary(ctx.plan)}.", False
+
+
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     GET_SCHEMA_TOOL["name"]: get_schema,
+    UPDATE_PLAN_TOOL["name"]: update_plan,
     RUN_CODE_TOOL["name"]: run_code,
     SAVE_CHART_TOOL["name"]: save_chart,
     ASK_USER_TOOL["name"]: ask_user,

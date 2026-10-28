@@ -5,6 +5,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 # Make the project root importable when running this file as a script.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -93,6 +94,31 @@ def main() -> int:
     answers = [execute_tool("ask_user", question, ctx)[0] for _ in range(MAX_USER_QUESTIONS + 1)]
     report("r) limit reached", answers[-1] == QUESTION_LIMIT_REACHED and len(calls) == MAX_USER_QUESTIONS,
            f"handler called {len(calls)} times; last reply: {answers[-1]}")
+
+    # update_plan only validates and stores the plan, so no sandbox is needed
+    def plan_call(items: Any) -> tuple[str, bool, ToolContext]:
+        ctx = ToolContext(sandbox=None)  # type: ignore[arg-type]
+        text, is_error = execute_tool("update_plan", {"items": items}, ctx)
+        return text, is_error, ctx
+
+    good = [
+        {"id": "1", "text": "Explore schema", "status": "done"},
+        {"id": "2", "text": "Revenue by category", "status": "in_progress"},
+        {"id": "3", "text": "Seasonality test", "status": "skipped", "note": "only 4 years"},
+    ]
+    text, is_error, ctx = plan_call(good)
+    report("s) valid plan stored", not is_error and ctx.plan is not None and len(ctx.plan) == 3,
+           text.splitlines()[0])
+
+    bad_cases = {
+        "t) duplicate ids": ([good[0], {**good[1], "id": "1"}], "duplicate id"),
+        "u) invalid status": ([{**good[0], "status": "finished"}], "invalid status"),
+        "v) skipped without note": ([{"id": "1", "text": "x", "status": "skipped"}], "without a reason"),
+        "w) empty plan": ([], "1-8"),
+    }
+    for name, (items, expected) in bad_cases.items():
+        text, is_error, ctx = plan_call(items)
+        report(name, is_error and expected in text and ctx.plan is None, text)
 
     # get_schema runs inside a real kernel
     with Sandbox() as sb:

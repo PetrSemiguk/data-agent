@@ -6,6 +6,7 @@ from agent.events import (
     ApiCallFinished,
     AssistantText,
     Event,
+    PlanUpdated,
     RunFinished,
     RunStarted,
     StepStarted,
@@ -18,6 +19,7 @@ from agent.events import (
 )
 
 SEPARATOR = "-" * 80
+PLAN_MARKS = {"pending": "☐", "in_progress": "▶", "done": "✔", "skipped": "✖"}
 
 
 class ConsolePrinter:
@@ -63,6 +65,11 @@ class ConsolePrinter:
                     print(f"[Tool: {name}] args: {json.dumps(tool_input)}")
             case ToolResult(output=output, is_error=is_error):
                 print(f"[{'Error' if is_error else 'Result'}]\n{output}")
+            case PlanUpdated(items=items):
+                print("[Plan]")
+                for item in items:
+                    note = f" ({item['note']})" if item.get("note") else ""
+                    print(f"  {PLAN_MARKS.get(item['status'], '?')} {item['id']}. {item['text']}{note}")
             case UserQuestion(question=question):
                 print(f"[Waiting for the user] {question}")
             case UserAnswered(answer=answer):

@@ -70,6 +70,14 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class PlanUpdated:
+    """The agent replaced its plan; `items` is the whole new plan."""
+
+    step: int
+    items: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
 class UserQuestion:
     """The run pauses: the agent waits for the human to answer this question."""
 
@@ -105,6 +113,7 @@ Event = (
     | AssistantText
     | ToolCall
     | ToolResult
+    | PlanUpdated
     | UserQuestion
     | UserAnswered
     | RunFinished

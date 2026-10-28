@@ -1,5 +1,6 @@
 """The agent loop: ask Claude, run the tools it requests, repeat until done."""
 
+import copy
 import json
 import logging
 import time
@@ -32,6 +33,7 @@ from agent.events import (
     TextDelta,
     ToolCall,
     ToolResult,
+    PlanUpdated,
     UserAnswered,
     UserQuestion,
 )
@@ -40,6 +42,7 @@ from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
     TOOLS,
+    UPDATE_PLAN_TOOL,
     AskUserFn,
     ToolContext,
     answer_for_model,
@@ -113,6 +116,7 @@ class AgentState:
     pending_tool_results: list[dict[str, Any]] = field(default_factory=list)
     pending_question: PendingQuestion | None = None
     charts: list[str] = field(default_factory=list)
+    plan: list[dict[str, str]] | None = None
 
 
 @dataclass
@@ -135,6 +139,9 @@ class RunResult:
     question: str | None = None
     options: list[str] | None = None
     state: AgentState | None = None
+    plan: list[dict[str, str]] | None = None
+    # True if the agent answered while plan items were still pending/in progress.
+    plan_incomplete: bool = False
 
 
 def create_client() -> anthropic.Anthropic:
@@ -283,6 +290,7 @@ def continue_run(
         output_dir=state.output_dir,
         ask_user_fn=ask_user_fn,
         questions_asked=state.questions_asked,
+        plan=state.plan,
     )
     step_logs: list[dict[str, Any]] = state.log["steps"]
 
@@ -422,6 +430,10 @@ def continue_run(
                         "duration_s": round(elapsed, 2),
                     }
                 )
+                if block.name == UPDATE_PLAN_TOOL["name"] and not is_error and ctx.plan:
+                    plan = copy.deepcopy(ctx.plan)
+                    step_log.setdefault("plan_updates", []).append(plan)
+                    emit(PlanUpdated(step=step, items=plan))
 
             if pending is not None:
                 state.pending_tool_results = tool_results
@@ -435,13 +447,27 @@ def continue_run(
             write_log(state.log_path, state.log)
     finally:
         state.questions_asked = ctx.questions_asked
+        state.plan = ctx.plan
         state.active_seconds += time.perf_counter() - segment_start
         state.charts = [chart.as_posix() for chart in sorted(state.output_dir.glob("*.png"))]
+        # Not enforced for now: a final answer with open plan items is only flagged.
+        open_items = [
+            item["id"] for item in state.plan or [] if item["status"] in ("pending", "in_progress")
+        ]
+        plan_incomplete = status == "completed" and bool(open_items)
+        warnings = (
+            [f"Final answer given while plan items are not finished: {', '.join(open_items)}."]
+            if plan_incomplete
+            else []
+        )
         state.log.update(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
             error_message=error_message,
             final_answer=final_answer,
+            plan=state.plan,
+            plan_incomplete=plan_incomplete,
+            warnings=warnings,
             charts=state.charts,
             totals={
                 "steps": len(step_logs),
@@ -467,6 +493,8 @@ def continue_run(
             question=state.pending_question.question if waiting else None,
             options=state.pending_question.options if waiting else None,
             state=state if waiting else None,
+            plan=copy.deepcopy(state.plan),
+            plan_incomplete=plan_incomplete,
         )
         emit(
             RunFinished(

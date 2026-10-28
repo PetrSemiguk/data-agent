@@ -24,6 +24,7 @@ from agent.events import (  # noqa: E402
     ApiCallFinished,
     AssistantText,
     Event,
+    PlanUpdated,
     RunFinished,
     RunStarted,
     StepStarted,
@@ -72,6 +73,11 @@ def ask(question: str, options: list[str] | None = None, block_id: str = "toolu_
     if options:
         tool_input["options"] = options
     return SimpleNamespace(type="tool_use", id=block_id, name="ask_user", input=tool_input)
+
+
+def plan_use(statuses: list[str], block_id: str = "toolu_plan") -> Any:
+    items = [{"id": str(i), "text": f"Step {i}", "status": s} for i, s in enumerate(statuses, start=1)]
+    return SimpleNamespace(type="tool_use", id=block_id, name="update_plan", input={"items": items})
 
 
 def last_tool_results(client: "FakeClient", call: int) -> list[dict[str, Any]]:
@@ -374,6 +380,60 @@ def main() -> int:
         expected = [q for q, _ in history[-MAX_HISTORY_TURNS:]]
         report("p) history trimmed", past_questions == expected,
                f"{len(history)} turns given, sent: {past_questions}")
+        cleanup(result)
+
+        # q) update_plan and run_code in ONE response: both run, the plan reaches the result
+        events = []
+        client = FakeClient([
+            make_response([plan_use(["done", "done"]), tool_use("print(2 + 2)", "toolu_code")], "tool_use"),
+            make_response([text("Answer.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client, on_event=events.append)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        plan_events = [e for e in events if isinstance(e, PlanUpdated)]
+        log = read_log(result)
+        report("q) update_plan alongside run_code",
+               [r["tool_use_id"] for r in results] == ["toolu_plan", "toolu_code"]
+               and results[0]["content"].startswith("Plan updated: 2/2 done")
+               and results[1]["content"].startswith("4")
+               and len(plan_events) == 1 and plan_events[0].step == 1
+               and result.plan == plan_events[0].items and not result.plan_incomplete
+               and log is not None and log["plan"] == result.plan
+               and log["steps"][0]["plan_updates"] == [result.plan],
+               f"results={[r['content'].splitlines()[0] for r in results]}, "
+               f"PlanUpdated={len(plan_events)}, plan_incomplete={result.plan_incomplete}")
+        cleanup(result)
+
+        # r) The plan survives a pause for a question
+        client = FakeClient([
+            make_response([plan_use(["done", "pending"]), ask("Which year?", block_id="toolu_ask")], "tool_use"),
+            make_response([plan_use(["done", "done"], "toolu_plan2")], "tool_use"),
+            make_response([text("Answer.")], "end_turn"),
+        ])
+        paused = run_agent("Q", sb, client, pause_on_ask=True)  # type: ignore[arg-type]
+        kept = paused.state.plan if paused.state else None
+        final = resume_agent(paused.state, "2011", sb, client)  # type: ignore[arg-type]
+        report("r) plan survives pause/resume",
+               paused.status == "waiting_for_user" and kept is not None
+               and [i["status"] for i in kept] == ["done", "pending"]
+               and final.status == "completed" and [i["status"] for i in final.plan or []] == ["done", "done"]
+               and not final.plan_incomplete,
+               f"plan at pause={[i['status'] for i in kept or []]}, "
+               f"final={[i['status'] for i in final.plan or []]}")
+        cleanup(final)
+
+        # s) A final answer with open plan items is flagged, not blocked
+        client = FakeClient([
+            make_response([plan_use(["done", "in_progress", "pending"])], "tool_use"),
+            make_response([text("Answer.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client)  # type: ignore[arg-type]
+        log = read_log(result)
+        report("s) plan_incomplete flagged",
+               result.status == "completed" and result.plan_incomplete
+               and log is not None and log["plan_incomplete"] and "2, 3" in log["warnings"][0],
+               f"status={result.status}, plan_incomplete={result.plan_incomplete}, "
+               f"warning={log['warnings'] if log else '-'}")
         cleanup(result)
 
         # g) A crashing event handler does not break the run

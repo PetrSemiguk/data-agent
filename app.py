@@ -27,12 +27,14 @@ from agent.events import (
     StepStarted,
     StreamReset,
     TextDelta,
+    PlanUpdated,
     ToolCall,
     ToolResult,
     UserAnswered,
 )
 from agent.loop import RunResult, create_client, resume_agent, run_agent
 from agent.sandbox import Sandbox
+from agent.tools import plan_summary
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
@@ -40,12 +42,19 @@ PLACEHOLDER_KEY = "your-api-key-here"
 
 TOOL_ICONS = {
     "get_schema": ":material/table_view:",
+    "update_plan": ":material/checklist:",
     "run_code": ":material/code:",
     "save_chart": ":material/bar_chart:",
     "ask_user": ":material/help:",
 }
 ANSWER_ICON = ":material/check:"
 STREAM_REFRESH_S = 0.1  # how often streamed text is redrawn
+PLAN_ICONS = {
+    "pending": ":material/radio_button_unchecked:",
+    "in_progress": ":material/play_circle:",
+    "done": ":material/check_circle:",
+    "skipped": ":material/cancel:",
+}
 
 # Code blocks and inline code are shown literally, so $ inside them is left alone.
 CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
@@ -109,6 +118,16 @@ def load_dataset(uploaded: UploadedFile) -> None:
     new_conversation()
 
 
+def plan_markdown(items: list[dict[str, str]]) -> str:
+    """The plan as a checklist with progress in the header."""
+    lines = [f"**Plan** · {plan_summary(items)}"]
+    for item in items:
+        note = f" _({item['note']})_" if item.get("note") else ""
+        text = f"~~{item['text']}~~" if item["status"] == "skipped" else item["text"]
+        lines.append(f"- {PLAN_ICONS.get(item['status'], '')} {text}{note}")
+    return escape_dollars("\n".join(lines))
+
+
 class StepRenderer:
     """Draws agent events as one status block per step.
 
@@ -116,9 +135,11 @@ class StepRenderer:
     collapsed. Finished steps collapse and are marked complete or failed.
     """
 
-    def __init__(self, parent: DeltaGenerator, live: bool) -> None:
+    def __init__(self, parent: DeltaGenerator, live: bool, plan_slot: DeltaGenerator | None = None) -> None:
         self.parent = parent
         self.live = live
+        # The plan is drawn above the steps and redrawn whenever it changes.
+        self.plan_slot = plan_slot
         self.box: StatusContainer | None = None
         self.step = 0
         self.tools: list[str] = []
@@ -169,7 +190,10 @@ class StepRenderer:
                 self.tools.append(name)
                 self.box.update(label=f"Step {self.step} · {self._what()}")
                 code = tool_input.get("code")
-                if name == "ask_user":
+                if name == "update_plan":
+                    # The plan itself is shown above the steps.
+                    self.box.caption(":material/checklist: Plan updated")
+                elif name == "ask_user":
                     options = "".join(f"\n- {option}" for option in tool_input.get("options") or [])
                     self.box.markdown(escape_dollars(f"**Question:** {tool_input.get('question')}{options}"))
                 elif isinstance(code, str):
@@ -185,6 +209,8 @@ class StepRenderer:
                     self.box.image(base64.b64decode(image))
                 for path in event.chart_paths:
                     self.box.image(path, caption=Path(path).name)
+            case PlanUpdated(items=items) if self.plan_slot:
+                self.plan_slot.container(border=True).markdown(plan_markdown(items))
             case UserAnswered(question=question, answer=answer):
                 # The question and the human's answer stay visible between the steps.
                 shown = answer or "_left to the agent_"
@@ -249,6 +275,9 @@ def show_result(result: RunResult) -> None:
     elif result.status != "completed":
         st.warning(escape_dollars(f"Stopped ({result.status}): {result.error_message}"))
 
+    if result.plan_incomplete:
+        st.caption(":material/info: The agent answered before finishing every item of its plan.")
+
     if result.final_answer:
         st.markdown(escape_dollars(result.final_answer))
 
@@ -295,8 +324,8 @@ def live_handler(events: list[Event], renderer: StepRenderer) -> Callable[[Event
     return on_event
 
 
-def replay(events: list[Event], parent: DeltaGenerator) -> None:
-    renderer = StepRenderer(parent, live=False)
+def replay(events: list[Event], parent: DeltaGenerator, plan_slot: DeltaGenerator) -> None:
+    renderer = StepRenderer(parent, live=False, plan_slot=plan_slot)
     for event in events:
         renderer(event)
 
@@ -347,8 +376,9 @@ for index, turn in enumerate(turns):
     with st.chat_message("user"):
         st.markdown(escape_dollars(turn["question"]))
     with st.chat_message("assistant"):
+        plan_slot = st.empty()
         steps_area = st.container()
-        replay(turn["events"], steps_area)
+        replay(turn["events"], steps_area, plan_slot)
         result: RunResult | None = turn["result"]
         if result is None:
             st.warning("This question did not finish.")
@@ -366,7 +396,9 @@ for index, turn in enumerate(turns):
                         answer,
                         get_sandbox(),
                         get_client(),
-                        on_event=live_handler(turn["events"], StepRenderer(steps_area, live=True)),
+                        on_event=live_handler(
+                            turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
+                        ),
                     )
                 st.rerun()
 
@@ -386,6 +418,7 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(escape_dollars(prompt))
     with st.chat_message("assistant"):
+        plan_slot = st.empty()
         steps_area = st.container()
         with st.spinner("The agent is analyzing the data..."):
             turn["result"] = run_agent(
@@ -393,7 +426,9 @@ if prompt:
                 get_sandbox(),
                 get_client(),
                 dataset_file=str(st.session_state.dataset_path),
-                on_event=live_handler(turn["events"], StepRenderer(steps_area, live=True)),
+                on_event=live_handler(
+                    turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
+                ),
                 pause_on_ask=True,
                 history=history,
                 conversation_id=st.session_state.conversation_id,
