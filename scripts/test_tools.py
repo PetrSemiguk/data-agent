@@ -1,6 +1,7 @@
-"""Checks for agent.tools.truncate_output (no API calls)."""
+"""Checks for agent.tools: truncate_output and get_schema (no API calls)."""
 
 import sys
+import time
 from pathlib import Path
 
 # Make the project root importable when running this file as a script.
@@ -8,7 +9,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.config import MAX_OUTPUT_CHARS, OUTPUT_HEAD_CHARS, OUTPUT_TAIL_CHARS  # noqa: E402
-from agent.tools import truncate_output  # noqa: E402
+from agent.sandbox import Sandbox  # noqa: E402
+from agent.tools import execute_tool, truncate_output  # noqa: E402
+
+DATA_DIR = PROJECT_ROOT / "data"
 
 passed = 0
 failed = 0
@@ -49,6 +53,38 @@ def main() -> int:
           and out.endswith(long_text[-OUTPUT_TAIL_CHARS:]))
     report("d) head and tail kept", ok,
            f"starts with {out[:5]!r}, ends with {out[-3:]!r}")
+
+    # get_schema runs inside a real kernel
+    with Sandbox() as sb:
+        sb.load_dataframe(DATA_DIR / "Titanic-Dataset.csv")
+        text, is_error = execute_tool("get_schema", {}, sb)
+        header = text.splitlines()[0] if text else ""
+
+        # e) Shape is correct
+        report("e) Titanic shape", not is_error and "891 rows x 12 columns" in header, header)
+
+        # f) Missing ages are reported
+        age = next((line for line in text.splitlines() if line.startswith("- Age:")), "")
+        report("f) Age missing 177", "missing 177" in age, age[:90])
+
+        # g) Unknown variable is an error
+        text, is_error = execute_tool("get_schema", {"variable": "nope"}, sb)
+        report("g) unknown variable", is_error, text)
+
+        # h) Text dates are detected
+        sb.load_dataframe(DATA_DIR / "Sample - Superstore.csv")
+        text, _ = execute_tool("get_schema", {}, sb)
+        order_date = next((line for line in text.splitlines() if line.startswith("- Order Date:")), "")
+        report("h) Order Date looks like date", "looks like date" in order_date, order_date)
+
+        # i) Fast enough on 1M rows
+        sb.load_dataframe(DATA_DIR / "online_retail_II.csv")
+        start = time.perf_counter()
+        text, is_error = execute_tool("get_schema", {}, sb)
+        elapsed = time.perf_counter() - start
+        report("i) Online Retail under 10s", not is_error and elapsed < 10,
+               f"{elapsed:.1f}s, {len(text)} chars")
+        print(f"\n--- get_schema output for Online Retail II ---\n{text}\n")
 
     print(f"\nTotal: {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1

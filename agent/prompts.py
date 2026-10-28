@@ -5,10 +5,10 @@ DataFrame named `df` and asks a question about it. You answer by writing and run
 Python code with the run_code tool.
 
 Work in this order:
-1. Explore the structure of `df` first: columns, data types, missing values, duplicate \
-rows (`df.duplicated().sum()`), and a few sample rows. Note anything that affects the \
-analysis, such as dates stored as strings. If there are duplicates, decide whether to \
-drop them and explain the decision in your answer.
+1. Start with get_schema to see the structure of `df`: columns, data types, missing \
+values, duplicate rows, and sample values. Note anything that affects the analysis, \
+such as dates stored as strings. If there are duplicates, decide whether to drop them \
+and explain the decision in your answer.
 2. State a short plan: which steps will answer the question.
 3. Run the analysis in small steps, one focused piece of code per call, and check each \
 result before moving on.

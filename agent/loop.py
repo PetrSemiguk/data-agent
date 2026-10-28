@@ -1,5 +1,6 @@
 """The agent loop: ask Claude, run the tools it requests, repeat until done."""
 
+import json
 import time
 from typing import Any
 
@@ -8,7 +9,7 @@ import anthropic
 from agent.config import MAX_STEPS
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
-from agent.tools import RUN_CODE_TOOL, execute_tool
+from agent.tools import TOOLS, execute_tool
 
 SEPARATOR = "-" * 80
 
@@ -37,7 +38,7 @@ def run_agent(
                 model=model,
                 max_tokens=4096,
                 system=SYSTEM_PROMPT,
-                tools=[RUN_CODE_TOOL],
+                tools=TOOLS,
                 messages=messages,
             )
             elapsed = time.perf_counter() - start
@@ -105,8 +106,11 @@ def print_assistant_blocks(content: list[Any]) -> None:
         if block.type == "text" and block.text.strip():
             print(f"[Agent]\n{block.text.strip()}")
         elif block.type == "tool_use":
-            code = block.input.get("code", block.input)
-            print(f"[Code: {block.name}]\n{SEPARATOR}\n{code}\n{SEPARATOR}")
+            code = block.input.get("code")
+            if isinstance(code, str):
+                print(f"[Tool: {block.name}]\n{SEPARATOR}\n{code}\n{SEPARATOR}")
+            else:
+                print(f"[Tool: {block.name}] args: {json.dumps(block.input)}")
 
 
 def print_tool_result(output: str, is_error: bool) -> None:
