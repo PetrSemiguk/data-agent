@@ -26,6 +26,7 @@ OUTPUTS_DIR = "outputs"
 # Agent loop
 MAX_STEPS = 15
 MAX_USER_QUESTIONS = 2
+MAX_HISTORY_TURNS = 5  # earlier (question, answer) pairs of a chat sent to the model
 MAX_TOTAL_TOKENS = 200_000  # input + output for the whole run
 
 # Claude API client; the SDK itself retries 408/409/429/5xx and connection errors

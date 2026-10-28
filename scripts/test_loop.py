@@ -14,7 +14,12 @@ import httpx2
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.config import MAX_TOTAL_TOKENS, MAX_USER_QUESTIONS, OUTPUTS_DIR  # noqa: E402
+from agent.config import (  # noqa: E402
+    MAX_HISTORY_TURNS,
+    MAX_TOTAL_TOKENS,
+    MAX_USER_QUESTIONS,
+    OUTPUTS_DIR,
+)
 from agent.events import (  # noqa: E402
     ApiCallFinished,
     AssistantText,
@@ -335,6 +340,40 @@ def main() -> int:
                pauses == MAX_USER_QUESTIONS and result.status == "completed"
                and third[0]["content"].startswith(QUESTION_LIMIT_REACHED),
                f"pauses={pauses}, third question got: {third[0]['content'].splitlines()[0]!r}")
+        cleanup(result)
+
+        # o) Earlier chat turns come before the new question; the log links the chat
+        client = FakeClient([make_response([text("Technology.")], "end_turn")])
+        history = [("Top category?", "Technology."), ("By how much?", "By 4%.")]
+        result = run_agent(
+            "And the most profitable?", sb, client, history=history,  # type: ignore[arg-type]
+            conversation_id="conv-test", turn=3,
+        )
+        sent = client.requests[0]
+        last = sent[-1]["content"]
+        log = read_log(result)
+        ok = (
+            [m["role"] for m in sent] == ["user", "assistant", "user", "assistant", "user"]
+            and [m["content"] for m in sent[:4]] == ["Top category?", "Technology.", "By how much?", "By 4%."]
+            and isinstance(last, list) and last[-1]["text"] == "And the most profitable?"
+            and "continues the conversation" in last[0]["text"]
+            and log is not None and log["conversation_id"] == "conv-test" and log["turn"] == 3
+            and log["history_turns_sent"] == 2
+        )
+        report("o) history before the question", ok,
+               f"roles={[m['role'] for m in sent]}, log conversation_id="
+               f"{log['conversation_id'] if log else '-'}, turn={log['turn'] if log else '-'}")
+        cleanup(result)
+
+        # p) Only the last MAX_HISTORY_TURNS turns are sent
+        client = FakeClient([make_response([text("Ok.")], "end_turn")])
+        history = [(f"Q{i}", f"A{i}") for i in range(1, MAX_HISTORY_TURNS + 3)]
+        result = run_agent("New?", sb, client, history=history)  # type: ignore[arg-type]
+        sent = client.requests[0]
+        past_questions = [m["content"] for m in sent[:-1] if m["role"] == "user"]
+        expected = [q for q, _ in history[-MAX_HISTORY_TURNS:]]
+        report("p) history trimmed", past_questions == expected,
+               f"{len(history)} turns given, sent: {past_questions}")
         cleanup(result)
 
         # g) A crashing event handler does not break the run

@@ -7,8 +7,10 @@ import json
 import os
 import re
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import anthropic
 import streamlit as st
@@ -103,8 +105,8 @@ def load_dataset(uploaded: UploadedFile) -> None:
     st.session_state.file_id = uploaded.file_id
     st.session_state.dataset_path = path
     st.session_state.shape = ast.literal_eval(shape)
-    st.session_state.pop("result", None)
-    st.session_state.pop("events", None)
+    # A different file means a different conversation.
+    new_conversation()
 
 
 class StepRenderer:
@@ -221,10 +223,8 @@ class StepRenderer:
         self.box = None
 
 
-def ask_question(slot: DeltaGenerator, result: RunResult) -> str | None:
+def ask_question(slot: DeltaGenerator, result: RunResult, key: str) -> str | None:
     """Show the agent's question; return the answer once given ("" = agent decides)."""
-    # Keys change with every question so old input does not carry over.
-    key = f"q{result.state.questions_asked if result.state else 0}"
     answer: str | None = None
     with slot.container(border=True):
         st.info(escape_dollars(f"The agent asks: {result.question}"), icon=":material/help:")
@@ -242,13 +242,11 @@ def ask_question(slot: DeltaGenerator, result: RunResult) -> str | None:
 
 
 def show_result(result: RunResult) -> None:
-    """Render the outcome of one agent run."""
+    """Render the outcome of one run inside its chat message."""
     # st.error and st.warning render markdown too, so their text is escaped as well.
-    if result.status == "completed":
-        st.success("Analysis completed")
-    elif result.status == "api_error":
+    if result.status == "api_error":
         st.error(escape_dollars(result.error_message or "API error"))
-    else:
+    elif result.status != "completed":
         st.warning(escape_dollars(f"Stopped ({result.status}): {result.error_message}"))
 
     if result.final_answer:
@@ -257,17 +255,55 @@ def show_result(result: RunResult) -> None:
     for chart in result.charts:
         st.image(chart, caption=Path(chart).name)
 
-    steps, tokens_in, tokens_out, duration = st.columns(4)
-    steps.metric("Steps", result.steps)
-    tokens_in.metric("Tokens in", f"{result.input_tokens:,}")
-    tokens_out.metric("Tokens out", f"{result.output_tokens:,}")
-    duration.metric("Time", f"{result.duration_s:.1f} s")
-    st.caption(f"Run log: {result.log_path}")
+    st.caption(
+        f"{result.steps} steps · tokens {result.input_tokens:,} in / {result.output_tokens:,} out "
+        f"· {result.duration_s:.1f} s · log: {result.log_path}"
+    )
+
+
+def turn_tokens(turns: list[dict[str, Any]]) -> int:
+    return sum(t["result"].input_tokens + t["result"].output_tokens for t in turns if t["result"])
+
+
+def new_conversation() -> None:
+    """Start an empty chat; the totals of the old one are kept for the session counter."""
+    old_turns = st.session_state.get("turns", [])
+    st.session_state.past_questions = st.session_state.get("past_questions", 0) + len(old_turns)
+    st.session_state.past_tokens = st.session_state.get("past_tokens", 0) + turn_tokens(old_turns)
+    st.session_state.turns = []
+    st.session_state.conversation_id = uuid.uuid4().hex[:12]
+
+
+def chat_history(turns: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """(question, final answer) pairs of the finished questions of this chat."""
+    return [
+        (turn["question"], turn["result"].final_answer)
+        for turn in turns
+        if turn["result"] and turn["result"].status == "completed" and turn["result"].final_answer
+    ]
+
+
+def live_handler(events: list[Event], renderer: StepRenderer) -> Callable[[Event], None]:
+    """Draw events as they come and keep them for redrawing on later reruns."""
+
+    def on_event(event: Event) -> None:
+        # Deltas are not kept: AssistantText carries the full text.
+        if not isinstance(event, (TextDelta, StreamReset)):
+            events.append(event)
+        renderer(event)
+
+    return on_event
+
+
+def replay(events: list[Event], parent: DeltaGenerator) -> None:
+    renderer = StepRenderer(parent, live=False)
+    for event in events:
+        renderer(event)
 
 
 st.set_page_config(page_title="Data Agent", page_icon="📊", layout="wide")
 st.title("Data Agent")
-st.write("Upload a CSV or Excel file, ask a question, and get an answer backed by numbers and charts.")
+st.write("Upload a CSV or Excel file and ask questions about it in a chat.")
 
 load_dotenv()
 api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -278,6 +314,9 @@ if not api_key or api_key == PLACEHOLDER_KEY:
     )
     st.stop()
 
+if "turns" not in st.session_state:
+    new_conversation()
+
 with st.sidebar:
     st.header("Dataset")
     uploaded = st.file_uploader("CSV or Excel file", type=["csv", "xlsx"])
@@ -287,71 +326,78 @@ with st.sidebar:
         st.write(f"**{uploaded.name}**")
         st.caption(f"{uploaded.size / 1024 / 1024:.2f} MB · {rows:,} rows · {cols} columns")
 
-previous: RunResult | None = st.session_state.get("result")
-waiting = previous is not None and previous.status == "waiting_for_user"
+    if st.button("New conversation", disabled=uploaded is None, use_container_width=True):
+        # A clean kernel, so variables from the old chat cannot leak into the new one.
+        with st.spinner("Restarting the kernel..."):
+            sandbox = get_sandbox()
+            sandbox.restart()
+            sandbox.load_dataframe(st.session_state.dataset_path)
+        new_conversation()
 
-question = st.text_area("Question", placeholder="Which product categories bring the most revenue?")
-analyze = st.button("Analyze", type="primary", disabled=uploaded is None or waiting)
+    turns: list[dict[str, Any]] = st.session_state.turns
+    questions = st.session_state.past_questions + len(turns)
+    tokens = st.session_state.past_tokens + turn_tokens(turns)
+    st.caption(f"This session: {questions} questions · {tokens:,} tokens")
 
-# Steps are drawn here, above the question widget and the final answer.
-steps_area = st.container()
-question_slot = st.empty()
-answer = ask_question(question_slot, previous) if waiting and previous else None
+if not turns:
+    st.info("Upload a dataset in the sidebar, then ask your first question below.")
 
+# The whole chat is redrawn from session_state on every rerun.
+for index, turn in enumerate(turns):
+    with st.chat_message("user"):
+        st.markdown(escape_dollars(turn["question"]))
+    with st.chat_message("assistant"):
+        steps_area = st.container()
+        replay(turn["events"], steps_area)
+        result: RunResult | None = turn["result"]
+        if result is None:
+            st.warning("This question did not finish.")
+        elif result.status != "waiting_for_user":
+            show_result(result)
+        elif index == len(turns) - 1 and result.state is not None:
+            # The agent asked a question inside this answer: ask the human here.
+            slot = st.empty()
+            answer = ask_question(slot, result, key=f"turn{index}_q{result.state.questions_asked}")
+            if answer is not None:
+                slot.empty()
+                with st.spinner("The agent continues with your answer..."):
+                    turn["result"] = resume_agent(
+                        result.state,
+                        answer,
+                        get_sandbox(),
+                        get_client(),
+                        on_event=live_handler(turn["events"], StepRenderer(steps_area, live=True)),
+                    )
+                st.rerun()
 
-def live_handler(renderer: StepRenderer) -> Callable[[Event], None]:
-    """Draw events as they come and keep them for redrawing on later reruns."""
-
-    def on_event(event: Event) -> None:
-        # Deltas are not kept: AssistantText carries the full text.
-        if not isinstance(event, (TextDelta, StreamReset)):
-            st.session_state.events.append(event)
-        renderer(event)
-
-    return on_event
-
-
-def replay_events() -> None:
-    replay = StepRenderer(steps_area, live=False)
-    for saved_event in st.session_state.get("events", []):
-        replay(saved_event)
-
-
-if analyze and not question.strip():
-    st.warning("Please enter a question.")
-elif analyze:
-    st.session_state.events = []
-    st.session_state.pop("result", None)
-    with st.spinner("The agent is analyzing the data..."):
-        st.session_state.result = run_agent(
-            question.strip(),
-            get_sandbox(),
-            get_client(),
-            dataset_file=str(st.session_state.dataset_path),
-            on_event=live_handler(StepRenderer(steps_area, live=True)),
-            pause_on_ask=True,
-        )
-elif answer is not None and previous and previous.state:
-    # The human answered: redraw earlier steps, then continue the same run live.
-    replay_events()
-    question_slot.empty()
-    with st.spinner("The agent continues with your answer..."):
-        st.session_state.result = resume_agent(
-            previous.state,
-            answer,
-            get_sandbox(),
-            get_client(),
-            on_event=live_handler(StepRenderer(steps_area, live=True)),
-        )
+waiting = bool(turns) and turns[-1]["result"] is not None and turns[-1]["result"].status == "waiting_for_user"
+if uploaded is None:
+    hint = "Upload a dataset to start"
+elif waiting:
+    hint = "Answer the agent's question above first"
 else:
-    replay_events()
+    hint = "Ask a question about the data"
+prompt = st.chat_input(hint, disabled=uploaded is None or waiting)
 
-if (analyze and question.strip()) or answer is not None:
-    # Rerun once so the page is rebuilt from the new state: the question widget
-    # appears (or disappears) and the Analyze button gets the right state.
+if prompt:
+    history = chat_history(turns)
+    turn = {"question": prompt, "events": [], "result": None}
+    turns.append(turn)
+    with st.chat_message("user"):
+        st.markdown(escape_dollars(prompt))
+    with st.chat_message("assistant"):
+        steps_area = st.container()
+        with st.spinner("The agent is analyzing the data..."):
+            turn["result"] = run_agent(
+                prompt,
+                get_sandbox(),
+                get_client(),
+                dataset_file=str(st.session_state.dataset_path),
+                on_event=live_handler(turn["events"], StepRenderer(steps_area, live=True)),
+                pause_on_ask=True,
+                history=history,
+                conversation_id=st.session_state.conversation_id,
+                turn=len(turns),
+            )
+    # Rebuild the page from the new state (answer, question widget, input state).
     st.rerun()
-
-# Kept in session_state so the answer survives later reruns.
-result: RunResult | None = st.session_state.get("result")
-if result and result.status != "waiting_for_user":
-    show_result(result)

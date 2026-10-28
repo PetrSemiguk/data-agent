@@ -15,6 +15,7 @@ from agent.config import (
     API_MAX_RETRIES,
     API_TIMEOUT_SECONDS,
     LOGS_DIR,
+    MAX_HISTORY_TURNS,
     MAX_STEPS,
     MAX_TOTAL_TOKENS,
     OUTPUTS_DIR,
@@ -55,6 +56,13 @@ STREAM_BROKEN_ERRORS = (httpx2.TransportError, anthropic.APIConnectionError)
 # Error types the API may send as an event inside an open stream that are worth retrying.
 TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
 STREAM_RETRY_BASE_DELAY_S = 0.5
+
+CONTINUATION_NOTE = (
+    "This question continues the conversation above about the same dataset. "
+    "Variables you created while answering earlier questions may still exist in the "
+    "kernel, and `df` is still the original data. If you want to reuse an earlier "
+    "variable, check that it exists first with get_schema or dir()."
+)
 
 RunStatus = Literal[
     "running",
@@ -144,8 +152,16 @@ def run_agent(
     dataset_file: str | None = None,
     on_event: EventHandler | None = None,
     pause_on_ask: bool = False,
+    history: list[tuple[str, str]] | None = None,
+    conversation_id: str | None = None,
+    turn: int | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
+
+    `history` holds earlier (question, final answer) pairs of the same chat; the
+    last MAX_HISTORY_TURNS of them are sent before the new question. Every
+    question is still its own run; `conversation_id` and `turn` link the runs of
+    one chat in their logs.
 
     How the agent's clarifying questions (ask_user) are answered:
     - `ask_user_fn` given: it is called and blocks until the human answers (console);
@@ -167,9 +183,12 @@ def run_agent(
         log_path=log_path,
         model=model,
         max_steps=max_steps,
-        messages=[{"role": "user", "content": question}],
+        messages=build_messages(question, history),
         log={
             "run_id": run_dir.name,
+            "conversation_id": conversation_id,
+            "turn": turn,
+            "history_turns_sent": len((history or [])[-MAX_HISTORY_TURNS:]),
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "finished_at": None,
             "model": model,
@@ -186,6 +205,32 @@ def run_agent(
     emit(RunStarted(run_id=state.run_id, output_dir=run_dir.as_posix(), log_path=log_path.as_posix()))
     write_log(log_path, state.log)
     return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
+
+
+def build_messages(question: str, history: list[tuple[str, str]] | None) -> list[dict[str, Any]]:
+    """Start the conversation: recent chat turns as plain messages, then the question.
+
+    The note about continuing a chat goes into the new user message rather than
+    the system prompt, so the system prompt stays the same for every run.
+    """
+    recent = (history or [])[-MAX_HISTORY_TURNS:]
+    messages: list[dict[str, Any]] = []
+    for past_question, past_answer in recent:
+        messages.append({"role": "user", "content": past_question})
+        messages.append({"role": "assistant", "content": past_answer})
+    if not recent:
+        messages.append({"role": "user", "content": question})
+        return messages
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": CONTINUATION_NOTE},
+                {"type": "text", "text": question},
+            ],
+        }
+    )
+    return messages
 
 
 def resume_agent(
