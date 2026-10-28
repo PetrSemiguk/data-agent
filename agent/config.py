@@ -25,3 +25,4 @@ OUTPUTS_DIR = "outputs"
 
 # Agent loop
 MAX_STEPS = 15
+MAX_USER_QUESTIONS = 2

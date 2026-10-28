@@ -11,7 +11,7 @@ import anthropic
 from agent.config import MAX_STEPS, OUTPUTS_DIR
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
-from agent.tools import TOOLS, execute_tool
+from agent.tools import TOOLS, AskUserFn, ToolContext, execute_tool
 
 SEPARATOR = "-" * 80
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,8 +23,13 @@ def run_agent(
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-5-5",
     max_steps: int = MAX_STEPS,
+    ask_user_fn: AskUserFn | None = None,
 ) -> str:
-    """Answer a question about the data in the sandbox and return the final text."""
+    """Answer a question about the data in the sandbox and return the final text.
+
+    `ask_user_fn` lets the agent ask the human a clarifying question; with None
+    the agent is told the user is not available and must make assumptions.
+    """
     messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
     input_tokens = 0
     output_tokens = 0
@@ -36,6 +41,7 @@ def run_agent(
     run_dir = PROJECT_ROOT / OUTPUTS_DIR / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output folder: {run_dir.as_posix()}")
+    ctx = ToolContext(sandbox=sandbox, output_dir=run_dir, ask_user_fn=ask_user_fn)
 
     try:
         for step in range(1, max_steps + 1):
@@ -77,7 +83,7 @@ def run_agent(
                 if block.type != "tool_use":
                     continue
                 start = time.perf_counter()
-                output, is_error = execute_tool(block.name, block.input, sandbox, run_dir)
+                output, is_error = execute_tool(block.name, block.input, ctx)
                 elapsed = time.perf_counter() - start
                 code_seconds += elapsed
                 # Let the model see slow operations.

@@ -3,11 +3,30 @@
 import base64
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent.config import MAX_OUTPUT_CHARS, OUTPUT_HEAD_CHARS, OUTPUT_TAIL_CHARS
+from agent.config import (
+    MAX_OUTPUT_CHARS,
+    MAX_USER_QUESTIONS,
+    OUTPUT_HEAD_CHARS,
+    OUTPUT_TAIL_CHARS,
+)
 from agent.sandbox import Sandbox
+
+# Shows a question (with optional choices) to a human and returns the raw answer.
+AskUserFn = Callable[[str, list[str] | None], str]
+
+
+@dataclass
+class ToolContext:
+    """Per-run state that tools need: the kernel, the run folder and the human."""
+
+    sandbox: Sandbox
+    output_dir: Path | None = None
+    ask_user_fn: AskUserFn | None = None
+    questions_asked: int = 0
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -89,7 +108,46 @@ SAVE_CHART_TOOL: dict[str, Any] = {
     },
 }
 
-TOOLS: list[dict[str, Any]] = [GET_SCHEMA_TOOL, RUN_CODE_TOOL, SAVE_CHART_TOOL]
+ASK_USER_TOOL: dict[str, Any] = {
+    "name": "ask_user",
+    "description": (
+        "Ask the user a clarifying question. Ask ONLY when the question is ambiguous, "
+        "AND different interpretations give substantially different numbers, AND the "
+        "data cannot resolve it. Never ask about anything you can check with code. "
+        "Ask one question at a time. If you can make a reasonable assumption, make it "
+        "and state it in the final answer instead of asking. The number of questions "
+        "per run is limited."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "question": {
+                "type": "string",
+                "description": "One short, specific question.",
+            },
+            "options": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 2,
+                "maxItems": 4,
+                "description": "Optional 2-4 answer choices the user can pick from.",
+            },
+        },
+        "required": ["question"],
+    },
+}
+
+TOOLS: list[dict[str, Any]] = [GET_SCHEMA_TOOL, RUN_CODE_TOOL, SAVE_CHART_TOOL, ASK_USER_TOOL]
+
+USER_UNAVAILABLE = (
+    "User is not available. Proceed with the most reasonable assumption "
+    "and state it explicitly in the final answer."
+)
+QUESTION_LIMIT_REACHED = "Question limit reached. Proceed with your best assumption and state it."
+NO_ANSWER = (
+    "The user gave no answer and left the decision to you. Proceed with the most "
+    "reasonable assumption and state it explicitly in the final answer."
+)
 
 MAX_FILENAME_CHARS = 60
 
@@ -179,15 +237,13 @@ def unique_path(folder: Path, stem: str) -> Path:
     return path
 
 
-def run_code(
-    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
-) -> tuple[str, bool]:
+def run_code(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     """Execute model-written code and turn the result into text."""
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Missing required input: code (a non-empty string).", True
 
-    result = sandbox.execute(code)
+    result = ctx.sandbox.execute(code)
 
     parts: list[str] = []
     if result.stdout:
@@ -203,9 +259,7 @@ def run_code(
     return text, not result.success
 
 
-def get_schema(
-    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
-) -> tuple[str, bool]:
+def get_schema(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     """Describe a DataFrame that lives in the kernel."""
     variable = tool_input.get("variable", "df")
     # Only plain names: the value is inserted into code that runs in the kernel.
@@ -213,7 +267,7 @@ def get_schema(
         return f"Invalid variable name: {variable!r}. Use a plain Python name like 'df'.", True
 
     code = f"{SCHEMA_CODE}\nprint(_agent_schema({variable!r}))\ndel _agent_schema"
-    result = sandbox.execute(code)
+    result = ctx.sandbox.execute(code)
     if not result.success:
         return f"get_schema failed:\n{result.error}", True
 
@@ -221,10 +275,9 @@ def get_schema(
     return text, text.startswith("ERROR:")
 
 
-def save_chart(
-    tool_input: dict[str, Any], sandbox: Sandbox, output_dir: Path | None
-) -> tuple[str, bool]:
+def save_chart(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     """Run chart code and save every captured PNG into the run folder."""
+    output_dir = ctx.output_dir
     if output_dir is None:
         return "save_chart is not available: no output folder for this run.", True
     code = tool_input.get("code")
@@ -239,7 +292,7 @@ def save_chart(
             f"if _plt.get_fignums():\n    _plt.gca().set_title({title!r})\n"
         )
 
-    result = sandbox.execute(code)
+    result = ctx.sandbox.execute(code)
     if not result.success:
         return result.error or "Chart code failed.", True
     if not result.images:
@@ -261,24 +314,47 @@ def save_chart(
     return "\n".join(lines), False
 
 
-ToolHandler = Callable[[dict[str, Any], Sandbox, Path | None], tuple[str, bool]]
+def ask_user(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Pass a clarifying question to the human, within the per-run limit."""
+    question = tool_input.get("question")
+    if not isinstance(question, str) or not question.strip():
+        return "Missing required input: question (a non-empty string).", True
+    options = tool_input.get("options")
+    if options is not None and (
+        not isinstance(options, list)
+        or not 2 <= len(options) <= 4
+        or not all(isinstance(option, str) for option in options)
+    ):
+        return "Invalid input: options must be a list of 2-4 strings.", True
+
+    if ctx.ask_user_fn is None:
+        return USER_UNAVAILABLE, False
+    if ctx.questions_asked >= MAX_USER_QUESTIONS:
+        return QUESTION_LIMIT_REACHED, False
+
+    ctx.questions_asked += 1
+    answer = ctx.ask_user_fn(question, options).strip()
+    if not answer:
+        return NO_ANSWER, False
+    # Turn "2" into the text of option 2 so the model sees the actual choice.
+    if options and answer.isdigit() and 1 <= int(answer) <= len(options):
+        answer = options[int(answer) - 1]
+    return f"User answered: {answer}", False
+
+
+ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
     GET_SCHEMA_TOOL["name"]: get_schema,
     RUN_CODE_TOOL["name"]: run_code,
     SAVE_CHART_TOOL["name"]: save_chart,
+    ASK_USER_TOOL["name"]: ask_user,
 }
 
 
-def execute_tool(
-    name: str,
-    tool_input: dict[str, Any],
-    sandbox: Sandbox,
-    output_dir: Path | None = None,
-) -> tuple[str, bool]:
+def execute_tool(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     """Run a tool requested by the model.
 
-    `output_dir` is the run folder where files such as charts are saved.
     Returns the text to send back to the model and whether it is an error.
     """
     handler = TOOL_HANDLERS.get(name)
@@ -286,5 +362,5 @@ def execute_tool(
         available = ", ".join(TOOL_HANDLERS)
         return f"Unknown tool: {name}. Available tools: {available}.", True
 
-    text, is_error = handler(tool_input, sandbox, output_dir)
+    text, is_error = handler(tool_input, ctx)
     return truncate_output(text), is_error

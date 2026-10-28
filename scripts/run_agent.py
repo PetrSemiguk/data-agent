@@ -15,18 +15,33 @@ from agent.loop import run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
 
+def console_ask_user(question: str, options: list[str] | None) -> str:
+    """Ask the human in the terminal; accepts an option number or free text."""
+    print(f"\n[Agent asks] {question}")
+    for number, option in enumerate(options or [], start=1):
+        print(f"  {number}. {option}")
+    hint = "Enter a number or your own answer" if options else "Your answer"
+    return input(f"{hint} (empty = agent decides): ")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ask the data agent a question about a dataset.")
     parser.add_argument("--file", required=True, help="Path to a CSV or XLSX file")
     parser.add_argument("--question", required=True, help="Question in natural language")
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Never ask the user; the agent must make and state its own assumptions",
+    )
     args = parser.parse_args()
 
     load_dotenv()
     client = anthropic.Anthropic()
+    ask_user_fn = None if args.non_interactive else console_ask_user
 
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
-        answer = run_agent(args.question, sb, client)
+        answer = run_agent(args.question, sb, client, ask_user_fn=ask_user_fn)
 
     print(f"\n{'=' * 30} Final answer {'=' * 30}\n{answer}")
 
