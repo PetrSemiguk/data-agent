@@ -142,6 +142,45 @@ ASK_USER_TOOL: dict[str, Any] = {
     },
 }
 
+CLAIM_STATUSES = ("supported", "contradicted", "unverifiable")
+
+REPORT_VERIFICATION_TOOL: dict[str, Any] = {
+    "name": "report_verification",
+    "description": (
+        "Submit the result of your verification. You MUST finish your work by calling "
+        "this tool exactly once, with every checkable claim of the answer. Use it after "
+        "you have recomputed the claims with code; do not write a text answer instead."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "claim": {
+                            "type": "string",
+                            "description": "The claim quoted verbatim from the answer (a short fragment).",
+                        },
+                        "status": {"type": "string", "enum": list(CLAIM_STATUSES)},
+                        "evidence": {
+                            "type": "string",
+                            "description": "What your code showed, with the numbers it printed.",
+                        },
+                        "correction": {
+                            "type": "string",
+                            "description": "Only for 'contradicted': what the correct statement is.",
+                        },
+                    },
+                    "required": ["claim", "status", "evidence"],
+                },
+            },
+        },
+        "required": ["claims"],
+    },
+}
+
 PLAN_STATUSES = ("pending", "in_progress", "done", "skipped")
 MAX_PLAN_ITEMS = 8
 
@@ -463,6 +502,35 @@ def update_plan(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool
     return f"Plan updated: {plan_summary(ctx.plan)}.", False
 
 
+def validate_claims(claims: Any) -> list[str]:
+    """Problems with the claims sent to report_verification; empty means valid."""
+    if not isinstance(claims, list) or not claims:
+        return ["claims must be a non-empty list."]
+    problems: list[str] = []
+    for position, item in enumerate(claims, start=1):
+        if not isinstance(item, dict):
+            problems.append(f"claim {position} must be an object.")
+            continue
+        for key in ("claim", "evidence"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                problems.append(f"claim {position} needs a non-empty '{key}'.")
+        status = item.get("status")
+        if status not in CLAIM_STATUSES:
+            problems.append(f"claim {position} has invalid status {status!r}; use one of {', '.join(CLAIM_STATUSES)}.")
+        correction = item.get("correction")
+        if status == "contradicted" and not (isinstance(correction, str) and correction.strip()):
+            problems.append(f"claim {position} is 'contradicted' without a 'correction'.")
+    return problems
+
+
+def report_verification(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Check the verifier's report; the loop ends the run once it is accepted."""
+    problems = validate_claims(tool_input.get("claims"))
+    if problems:
+        return "Report not accepted: " + " ".join(problems) + " Send the whole report again.", True
+    return f"Report accepted: {len(tool_input['claims'])} claims.", False
+
+
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -471,6 +539,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     RUN_CODE_TOOL["name"]: run_code,
     SAVE_CHART_TOOL["name"]: save_chart,
     ASK_USER_TOOL["name"]: ask_user,
+    REPORT_VERIFICATION_TOOL["name"]: report_verification,
 }
 
 

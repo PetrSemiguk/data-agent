@@ -117,6 +117,12 @@ class AgentState:
     pending_question: PendingQuestion | None = None
     charts: list[str] = field(default_factory=list)
     plan: list[dict[str, str]] | None = None
+    # What the model is told and offered; the verifier passes its own.
+    system: str = SYSTEM_PROMPT
+    tools: list[dict[str, Any]] = field(default_factory=lambda: TOOLS)
+    # A successful call of this tool ends the run; its input is kept here.
+    finish_tool: str | None = None
+    finish_input: dict[str, Any] | None = None
 
 
 @dataclass
@@ -179,7 +185,34 @@ def run_agent(
     API errors do not raise: they end the run with status "api_error".
     """
     emit = safe_emitter(on_event)
+    state = new_state(
+        build_messages(question, history),
+        model,
+        max_steps,
+        {
+            "conversation_id": conversation_id,
+            "turn": turn,
+            "history_turns_sent": len((history or [])[-MAX_HISTORY_TURNS:]),
+            "dataset_file": dataset_file,
+            "question": question,
+        },
+    )
+    emit(RunStarted(run_id=state.run_id, output_dir=state.output_dir.as_posix(), log_path=state.log_path.as_posix()))
+    return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
 
+
+def new_state(
+    messages: list[dict[str, Any]],
+    model: str,
+    max_steps: int,
+    log_fields: dict[str, Any],
+    **settings: Any,
+) -> AgentState:
+    """Create the run folder, the log file and the state of a new run.
+
+    `log_fields` are extra keys for the log; `settings` are other AgentState
+    fields (the verifier passes its system prompt, tools and finish tool).
+    """
     # Every run saves its files (charts) and its log under the same run id.
     run_dir = create_run_dir()
     log_path = PROJECT_ROOT / LOGS_DIR / f"{run_dir.name}.json"
@@ -190,17 +223,13 @@ def run_agent(
         log_path=log_path,
         model=model,
         max_steps=max_steps,
-        messages=build_messages(question, history),
+        messages=messages,
         log={
             "run_id": run_dir.name,
-            "conversation_id": conversation_id,
-            "turn": turn,
-            "history_turns_sent": len((history or [])[-MAX_HISTORY_TURNS:]),
+            **log_fields,
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "finished_at": None,
             "model": model,
-            "dataset_file": dataset_file,
-            "question": question,
             "status": "running",
             "error_message": None,
             "final_answer": None,
@@ -208,10 +237,10 @@ def run_agent(
             "charts": [],
             "steps": [],
         },
+        **settings,
     )
-    emit(RunStarted(run_id=state.run_id, output_dir=run_dir.as_posix(), log_path=log_path.as_posix()))
     write_log(log_path, state.log)
-    return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
+    return state
 
 
 def build_messages(question: str, history: list[tuple[str, str]] | None) -> list[dict[str, Any]]:
@@ -314,7 +343,9 @@ def continue_run(
             emit(StepStarted(step=step))
             start = time.perf_counter()
             try:
-                response = stream_message(client, state.model, state.messages, step, emit)
+                response = stream_message(
+                    client, state.model, state.system, state.tools, state.messages, step, emit
+                )
             except (anthropic.AnthropicError, *STREAM_BROKEN_ERRORS) as exc:
                 state.api_seconds += time.perf_counter() - start
                 status = "api_error"
@@ -434,6 +465,13 @@ def continue_run(
                     plan = copy.deepcopy(ctx.plan)
                     step_log.setdefault("plan_updates", []).append(plan)
                     emit(PlanUpdated(step=step, items=plan))
+                if block.name == state.finish_tool and not is_error:
+                    state.finish_input = block.input
+
+            if state.finish_input is not None:
+                status = "completed"
+                final_answer = extract_text(response.content) or None
+                break
 
             if pending is not None:
                 state.pending_tool_results = tool_results
@@ -524,6 +562,8 @@ def safe_emitter(on_event: EventHandler | None) -> EventHandler:
 def stream_message(
     client: anthropic.Anthropic,
     model: str,
+    system: str,
+    tools: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     step: int,
     emit: EventHandler,
@@ -539,8 +579,8 @@ def stream_message(
             with client.messages.stream(
                 model=model,
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                tools=TOOLS,
+                system=system,
+                tools=tools,
                 messages=messages,
             ) as stream:
                 stream_open = True

@@ -29,6 +29,9 @@ MAX_USER_QUESTIONS = 2
 MAX_HISTORY_TURNS = 5  # earlier (question, answer) pairs of a chat sent to the model
 MAX_TOTAL_TOKENS = 200_000  # input + output for the whole run
 
+# Verifier: a separate run that fact-checks a final answer
+VERIFY_MAX_STEPS = 6
+
 # Claude API client; the SDK itself retries 408/409/429/5xx and connection errors
 API_MAX_RETRIES = 4
 API_TIMEOUT_SECONDS = 120
