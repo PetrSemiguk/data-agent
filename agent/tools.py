@@ -14,7 +14,9 @@ RUN_CODE_TOOL: dict[str, Any] = {
         "To see a value, print() it or leave the expression as the last line of "
         "the code. Matplotlib charts are captured automatically; you will be told "
         "how many charts were generated, but you cannot see them. "
-        "Errors are returned with the exception type and traceback."
+        "Errors are returned with the exception type and traceback. "
+        "Available libraries: pandas, numpy, matplotlib, scipy. Installing other "
+        "packages is not allowed."
     ),
     "input_schema": {
         "type": "object",
