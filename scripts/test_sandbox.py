@@ -41,6 +41,12 @@ def timeout_path(error: str | None) -> str:
 
 def main() -> int:
     with Sandbox() as sb:
+        # 0) Common libraries are imported at startup (before load_dataframe)
+        r = sb.execute("pd.__name__, np.__name__, plt.__name__")
+        report("0) pd, np, plt preimported",
+               r.success and r.result == "('pandas', 'numpy', 'matplotlib.pyplot')",
+               f"result: {r.result or first_line(r.error)}")
+
         # a) DataFrame is loaded
         load = sb.load_dataframe(DATASET)
         r = sb.execute("df.shape")
