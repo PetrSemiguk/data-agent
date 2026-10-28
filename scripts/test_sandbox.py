@@ -29,6 +29,16 @@ def first_line(text: str | None) -> str:
     return text.splitlines()[0] if text else ""
 
 
+def timeout_path(error: str | None) -> str:
+    # The sandbox states in the timeout message how the timeout was handled.
+    text = error or ""
+    if "kernel was restarted" in text:
+        return "restart"
+    if "was interrupted" in text:
+        return "interrupt"
+    return "unknown"
+
+
 def main() -> int:
     with Sandbox() as sb:
         # a) DataFrame is loaded
@@ -59,13 +69,23 @@ def main() -> int:
         report("e) timeout + kernel alive",
                not r.success and "TimeoutError" in (r.error or "")
                and after.success and after.result == "(9994, 21)",
-               f"error: {first_line(r.error)}; then df.shape = {after.result}")
+               f"handled via: {timeout_path(r.error)}; then df.shape = {after.result}")
 
         # f) Chart is returned as an image
         r = sb.execute('df["Sales"].plot.hist();')
         sizes = ", ".join(str(len(img)) for img in r.images)
         report("f) chart image", r.success and len(r.images) >= 1,
                f"images: {len(r.images)}, base64 length: {sizes or '-'}")
+
+        # g) Pure Python loop must be stopped by interrupt, keeping variables
+        sb.execute("y = 42")
+        r = sb.execute("while True:\n    pass", timeout=3)
+        path = timeout_path(r.error)
+        after = sb.execute("y")
+        report("g) interrupt keeps variables",
+               not r.success and path == "interrupt"
+               and after.success and after.result == "42",
+               f"handled via: {path}; then y = {after.result}")
 
     print(f"\nTotal: {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1
