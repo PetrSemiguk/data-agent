@@ -4,14 +4,13 @@ import argparse
 import sys
 from pathlib import Path
 
-import anthropic
 from dotenv import load_dotenv
 
 # Make the project root importable when running this file as a script.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.loop import run_agent  # noqa: E402
+from agent.loop import create_client, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
 
@@ -24,7 +23,7 @@ def console_ask_user(question: str, options: list[str] | None) -> str:
     return input(f"{hint} (empty = agent decides): ")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Ask the data agent a question about a dataset.")
     parser.add_argument("--file", required=True, help="Path to a CSV or XLSX file")
     parser.add_argument("--question", required=True, help="Question in natural language")
@@ -35,16 +34,29 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Does not override variables already set in the environment.
     load_dotenv()
-    client = anthropic.Anthropic()
+    client = create_client()
     ask_user_fn = None if args.non_interactive else console_ask_user
 
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
-        answer = run_agent(args.question, sb, client, ask_user_fn=ask_user_fn)
+        result = run_agent(
+            args.question, sb, client, ask_user_fn=ask_user_fn, dataset_file=args.file
+        )
 
-    print(f"\n{'=' * 30} Final answer {'=' * 30}\n{answer}")
+    print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
+    if result.error_message:
+        print(f"Error: {result.error_message}")
+    if result.final_answer:
+        print(f"\n{result.final_answer}")
+    print(
+        f"\nSteps: {result.steps}, tokens in={result.input_tokens} out={result.output_tokens}, "
+        f"time {result.duration_s:.1f}s"
+    )
+    print(f"Log: {result.log_path}")
+    return 0 if result.status == "completed" else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

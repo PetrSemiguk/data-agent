@@ -26,3 +26,11 @@ OUTPUTS_DIR = "outputs"
 # Agent loop
 MAX_STEPS = 15
 MAX_USER_QUESTIONS = 2
+MAX_TOTAL_TOKENS = 200_000  # input + output for the whole run
+
+# Claude API client; the SDK itself retries 408/409/429/5xx and connection errors
+API_MAX_RETRIES = 4
+API_TIMEOUT_SECONDS = 120
+
+# JSON run logs, one file per run
+LOGS_DIR = "logs/runs"
