@@ -22,6 +22,8 @@ from agent.events import (  # noqa: E402
     RunFinished,
     RunStarted,
     StepStarted,
+    StreamReset,
+    TextDelta,
     ToolCall,
     ToolResult,
 )
@@ -67,8 +69,61 @@ def api_error(cls: type[anthropic.APIStatusError], status: int, message: str) ->
     return cls(f"Error code: {status}", response=response, body=body)
 
 
+class BrokenStream:
+    """A reply whose stream sends `deltas_before_break` text pieces, then fails.
+
+    By default the connection is lost; `error` replaces that with another exception,
+    e.g. an error event the API sends inside the stream.
+    """
+
+    def __init__(self, response: Any, deltas_before_break: int = 2, error: Exception | None = None) -> None:
+        self.response = response
+        self.deltas_before_break = deltas_before_break
+        self.error = error
+
+
+def stream_error_event(error_type: str, message: str) -> anthropic.APIStatusError:
+    """What the SDK raises for an `error` event inside an open stream (HTTP status is 200)."""
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(200, request=request)
+    body = {"type": "error", "error": {"type": error_type, "message": message}}
+    return anthropic.APIStatusError(str(body), response=response, body=body)
+
+
+class FakeStream:
+    """Context manager + iterator of stream events, like the SDK's MessageStream."""
+
+    def __init__(self, reply: Any) -> None:
+        self.reply = reply
+
+    def __enter__(self) -> "FakeStream":
+        # Errors before the stream opens: the SDK raises them from __enter__.
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def __iter__(self) -> Any:
+        response = self.reply.response if isinstance(self.reply, BrokenStream) else self.reply
+        sent = 0
+        for block in response.content:
+            if block.type != "text":
+                continue
+            # Split text into small pieces, as the API does.
+            for i in range(0, len(block.text), 4):
+                if isinstance(self.reply, BrokenStream) and sent == self.reply.deltas_before_break:
+                    raise self.reply.error or httpx2.ReadError("connection lost")
+                sent += 1
+                yield SimpleNamespace(type="text", text=block.text[i:i + 4])
+
+    def get_final_message(self) -> Any:
+        return self.reply
+
+
 class FakeClient:
-    """Has client.messages.create like the SDK; replays responses or raises."""
+    """Has client.messages.stream like the SDK; replays responses or raises."""
 
     def __init__(self, replies: list[Any] | None = None, repeat: Any = None) -> None:
         self.replies = list(replies or [])
@@ -76,12 +131,10 @@ class FakeClient:
         self.calls = 0
         self.messages = self
 
-    def create(self, **kwargs: Any) -> Any:
+    def stream(self, **kwargs: Any) -> FakeStream:
         self.calls += 1
         reply = self.replies.pop(0) if self.replies else self.repeat
-        if isinstance(reply, Exception):
-            raise reply
-        return reply
+        return FakeStream(reply)
 
 
 def read_log(result: RunResult) -> dict[str, Any] | None:
@@ -132,6 +185,9 @@ def main() -> int:
             make_response([text("The answer is 4.")], "end_turn"),
         ])
         result, _ = run(sb, client, on_event=events.append)
+        all_events = list(events)
+        # Text deltas are checked in test h; here only the step structure matters.
+        events = [e for e in all_events if not isinstance(e, TextDelta)]
         expected = [RunStarted, StepStarted, ApiCallFinished, AssistantText, ToolCall, ToolResult,
                     StepStarted, ApiCallFinished, AssistantText, RunFinished]
         kinds = [type(e) for e in events]
@@ -145,6 +201,63 @@ def main() -> int:
             and events[-1].result.status == "completed"  # type: ignore[union-attr]
         )
         report("f) events in order", ok, " -> ".join(k.__name__ for k in kinds))
+
+        # h) Text arrives as deltas that add up to the full text
+        ok = True
+        details = []
+        for step in (1, 2):
+            joined = "".join(e.text for e in all_events if isinstance(e, TextDelta) and e.step == step)
+            full = next(e.text for e in all_events if isinstance(e, AssistantText) and e.step == step)
+            deltas = sum(isinstance(e, TextDelta) and e.step == step for e in all_events)
+            ok = ok and joined == full and deltas > 1
+            details.append(f"step {step}: {deltas} deltas -> {joined!r}")
+        report("h) deltas join to full text", ok, "; ".join(details))
+
+        # i) The stream breaks mid-way, the step is retried and the run completes
+        events = []
+        client = FakeClient([
+            BrokenStream(make_response([text("Partial answer that breaks")], "end_turn")),
+            make_response([text("Full answer.")], "end_turn"),
+        ])
+        result, log = run(sb, client, on_event=events.append)
+        kinds = [type(e).__name__ for e in events if not isinstance(e, TextDelta)]
+        resets = [e for e in events if isinstance(e, StreamReset)]
+        after_reset = "".join(
+            e.text for e in events[events.index(resets[0]) + 1:] if isinstance(e, TextDelta)
+        ) if resets else ""
+        report("i) broken stream retried",
+               result.status == "completed" and result.final_answer == "Full answer."
+               and len(resets) == 1 and client.calls == 2 and after_reset == "Full answer."
+               and log is not None and len(log["steps"]) == 1,
+               f"status={result.status}, API calls={client.calls}, events: {' -> '.join(kinds)}")
+
+        # j) overloaded_error arrives as an event mid-stream: reset, retry, complete
+        events = []
+        client = FakeClient([
+            BrokenStream(make_response([text("Partial answer that breaks")], "end_turn"),
+                         error=stream_error_event("overloaded_error", "Overloaded")),
+            make_response([text("Full answer.")], "end_turn"),
+        ])
+        result, _ = run(sb, client, on_event=events.append)
+        kinds = [type(e).__name__ for e in events if not isinstance(e, TextDelta)]
+        resets = sum(isinstance(e, StreamReset) for e in events)
+        report("j) mid-stream overloaded_error retried",
+               result.status == "completed" and result.final_answer == "Full answer."
+               and resets == 1 and client.calls == 2,
+               f"status={result.status}, API calls={client.calls}, events: {' -> '.join(kinds)}")
+
+        # k) A permanent error event mid-stream is not retried
+        events = []
+        client = FakeClient([
+            BrokenStream(make_response([text("Partial answer that breaks")], "end_turn"),
+                         error=stream_error_event("invalid_request_error", "Bad input")),
+            make_response([text("Should not be requested.")], "end_turn"),
+        ])
+        result, _ = run(sb, client, on_event=events.append)
+        resets = sum(isinstance(e, StreamReset) for e in events)
+        report("k) mid-stream permanent error -> api_error",
+               result.status == "api_error" and resets == 0 and client.calls == 1,
+               f"status={result.status}, API calls={client.calls}; {result.error_message}")
 
         # g) A crashing event handler does not break the run
         def broken_handler(event: Event) -> None:

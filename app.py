@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import anthropic
@@ -21,6 +22,8 @@ from agent.events import (
     Event,
     RunFinished,
     StepStarted,
+    StreamReset,
+    TextDelta,
     ToolCall,
     ToolResult,
 )
@@ -38,6 +41,7 @@ TOOL_ICONS = {
     "ask_user": ":material/help:",
 }
 ANSWER_ICON = ":material/check:"
+STREAM_REFRESH_S = 0.1  # how often streamed text is redrawn
 
 # Code blocks and inline code are shown literally, so $ inside them is left alone.
 CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
@@ -116,6 +120,12 @@ class StepRenderer:
         self.tools: list[str] = []
         self.failed = False
         self.api_error = False
+        # Placeholders created when a step starts, so the layout is the same
+        # whether text arrives as live deltas or is replayed in full.
+        self.caption_slot: DeltaGenerator | None = None
+        self.text_slot: DeltaGenerator | None = None
+        self.streamed_text = ""
+        self.last_refresh = 0.0
 
     def __call__(self, event: Event) -> None:
         match event:
@@ -125,14 +135,33 @@ class StepRenderer:
                 self.box = self.parent.status(
                     f"Step {step} · thinking...", expanded=self.live, state="running"
                 )
-            case ApiCallFinished() if self.box:
-                self.box.caption(
+                self.caption_slot = self.box.empty()
+                self.text_slot = self.box.empty()
+                self.streamed_text = ""
+            case TextDelta(text=text) if self.text_slot:
+                self.streamed_text += text
+                # Redrawing markdown on every token is slow; refresh a few times a second.
+                now = time.monotonic()
+                if now - self.last_refresh >= STREAM_REFRESH_S:
+                    self.text_slot.markdown(escape_dollars(self.streamed_text) + " ▌")
+                    self.last_refresh = now
+            case StreamReset() if self.text_slot:
+                self.streamed_text = ""
+                self.text_slot.empty()
+            case ApiCallFinished() if self.caption_slot:
+                self.caption_slot.caption(
                     f"API call {event.duration_s:.1f} s · tokens in {event.input_tokens:,} "
                     f"· out {event.output_tokens:,}"
                 )
             case AssistantText(text=text) if self.box:
-                self.box.markdown(escape_dollars(text))
+                # The first text block replaces the streamed preview with the full text.
+                if self.text_slot is not None:
+                    self.text_slot.markdown(escape_dollars(text))
+                    self.text_slot = None
+                else:
+                    self.box.markdown(escape_dollars(text))
             case ToolCall(name=name, input=tool_input) if self.box:
+                self._clear_preview()
                 self.tools.append(name)
                 self.box.update(label=f"Step {self.step} · {self._what()}")
                 code = tool_input.get("code")
@@ -162,9 +191,17 @@ class StepRenderer:
             return ":material/error: API error"
         return f"{ANSWER_ICON} answer"
 
+    def _clear_preview(self) -> None:
+        """Release the text placeholder if no full text replaced it."""
+        if self.text_slot is not None and self.streamed_text:
+            # E.g. the API failed mid-stream: keep the partial text, drop the cursor.
+            self.text_slot.markdown(escape_dollars(self.streamed_text))
+        self.text_slot = None
+
     def _finish(self) -> None:
         if self.box is None:
             return
+        self._clear_preview()
         self.box.update(
             label=f"Step {self.step} · {self._what()}",
             state="error" if self.failed else "complete",
@@ -233,8 +270,10 @@ elif analyze:
     renderer = StepRenderer(steps_area, live=True)
 
     def on_event(event: Event) -> None:
-        # Keep every event so the steps can be redrawn on later reruns.
-        st.session_state.events.append(event)
+        # Keep events so the steps can be redrawn on later reruns; deltas are
+        # not needed for that, because AssistantText carries the full text.
+        if not isinstance(event, (TextDelta, StreamReset)):
+            st.session_state.events.append(event)
         renderer(event)
 
     with st.spinner("The agent is analyzing the data..."):

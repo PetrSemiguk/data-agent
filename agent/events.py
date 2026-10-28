@@ -31,6 +31,21 @@ class ApiCallFinished:
 
 
 @dataclass(frozen=True)
+class TextDelta:
+    """A piece of model text as it is generated; the full text follows as AssistantText."""
+
+    step: int
+    text: str
+
+
+@dataclass(frozen=True)
+class StreamReset:
+    """The stream broke mid-way and the step is retried: discard its partial text."""
+
+    step: int
+
+
+@dataclass(frozen=True)
 class AssistantText:
     step: int
     text: str
@@ -61,5 +76,15 @@ class RunFinished:
     code_duration_s: float
 
 
-Event = RunStarted | StepStarted | ApiCallFinished | AssistantText | ToolCall | ToolResult | RunFinished
+Event = (
+    RunStarted
+    | StepStarted
+    | TextDelta
+    | StreamReset
+    | ApiCallFinished
+    | AssistantText
+    | ToolCall
+    | ToolResult
+    | RunFinished
+)
 EventHandler = Callable[[Event], None]

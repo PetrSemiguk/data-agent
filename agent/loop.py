@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import anthropic
+import httpx2
 
 from agent.config import (
     API_MAX_RETRIES,
@@ -26,6 +27,8 @@ from agent.events import (
     RunFinished,
     RunStarted,
     StepStarted,
+    StreamReset,
+    TextDelta,
     ToolCall,
     ToolResult,
 )
@@ -35,6 +38,12 @@ from agent.tools import TOOLS, AskUserFn, ToolContext, execute_tool
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+
+# Errors raised while reading an already open stream; the SDK does not retry these.
+STREAM_BROKEN_ERRORS = (httpx2.TransportError, anthropic.APIConnectionError)
+# Error types the API may send as an event inside an open stream that are worth retrying.
+TRANSIENT_ERROR_TYPES = {"overloaded_error", "api_error", "rate_limit_error", "timeout_error"}
+STREAM_RETRY_BASE_DELAY_S = 0.5
 
 RunStatus = Literal["running", "completed", "max_steps", "budget_exceeded", "api_error", "stopped"]
 
@@ -136,14 +145,8 @@ def run_agent(
             emit(StepStarted(step=step))
             start = time.perf_counter()
             try:
-                response = client.messages.create(
-                    model=model,
-                    max_tokens=4096,
-                    system=SYSTEM_PROMPT,
-                    tools=TOOLS,
-                    messages=messages,
-                )
-            except anthropic.AnthropicError as exc:
+                response = stream_message(client, model, messages, step, emit)
+            except (anthropic.AnthropicError, *STREAM_BROKEN_ERRORS) as exc:
                 api_seconds += time.perf_counter() - start
                 status = "api_error"
                 error_message = describe_api_error(exc, model)
@@ -270,6 +273,48 @@ def run_agent(
     return result
 
 
+def stream_message(
+    client: anthropic.Anthropic,
+    model: str,
+    messages: list[dict[str, Any]],
+    step: int,
+    emit: EventHandler,
+) -> Any:
+    """Stream one model turn, reporting text deltas, and return the final message.
+
+    Opening the stream is retried by the SDK. A connection that breaks while the
+    stream is being read is not, so this function retries the whole turn itself.
+    """
+    for attempt in range(API_MAX_RETRIES + 1):
+        stream_open = False
+        try:
+            with client.messages.stream(
+                model=model,
+                max_tokens=4096,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=messages,
+            ) as stream:
+                stream_open = True
+                for event in stream:
+                    # Thinking and tool-input events are not shown; the final
+                    # message still contains every block unchanged.
+                    if event.type == "text":
+                        emit(TextDelta(step=step, text=event.text))
+                return stream.get_final_message()
+        except (*STREAM_BROKEN_ERRORS, anthropic.APIStatusError) as exc:
+            # Before the stream opened, the SDK has already retried what it could.
+            retryable = stream_open and (
+                isinstance(exc, STREAM_BROKEN_ERRORS) or is_transient_api_error(exc)
+            )
+            if not retryable or attempt == API_MAX_RETRIES:
+                raise
+            logger.warning("Stream broke on step %d (%s); retrying", step, exc)
+            emit(StreamReset(step=step))
+            time.sleep(STREAM_RETRY_BASE_DELAY_S * 2**attempt)
+    raise AssertionError("unreachable")
+
+
 def create_run_dir() -> Path:
     """Create outputs/<timestamp>/, adding a suffix if that run id is taken."""
     base = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -290,10 +335,27 @@ def write_log(path: Path, log: dict[str, Any]) -> None:
     path.write_text(json.dumps(log, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
-def describe_api_error(exc: anthropic.AnthropicError, model: str) -> str:
-    """Turn an SDK exception into a short, actionable message."""
+def is_transient_api_error(exc: Exception) -> bool:
+    """True for overload, rate-limit and server errors, including ones sent mid-stream.
+
+    An error event inside an open stream arrives with HTTP status 200, so its
+    kind is read from the error type in the body.
+    """
+    if not isinstance(exc, anthropic.APIStatusError):
+        return False
+    return exc.type in TRANSIENT_ERROR_TYPES or exc.status_code == 429 or exc.status_code >= 500
+
+
+def describe_api_error(exc: Exception, model: str) -> str:
+    """Turn an SDK or connection exception into a short, actionable message."""
     detail = api_error_detail(exc)
     retried = f"after {API_MAX_RETRIES} retries"
+    if isinstance(exc, httpx2.TransportError):
+        return f"Connection lost while streaming the response {retried}: {type(exc).__name__}."
+    # Status 200 means the error came as an event inside an open stream.
+    if isinstance(exc, anthropic.APIStatusError) and exc.status_code == 200:
+        when = f" {retried}" if exc.type in TRANSIENT_ERROR_TYPES else ""
+        return f"Anthropic API error during the response ({exc.type}){when}: {detail}"
     # Permanent errors: retrying cannot help.
     if isinstance(exc, anthropic.AuthenticationError):
         return "Authentication failed: check ANTHROPIC_API_KEY in .env."
@@ -317,7 +379,7 @@ def describe_api_error(exc: anthropic.AnthropicError, model: str) -> str:
     return f"API client error: {exc}"
 
 
-def api_error_detail(exc: anthropic.AnthropicError) -> str:
+def api_error_detail(exc: Exception) -> str:
     """The API's own error message, without the raw JSON body."""
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
