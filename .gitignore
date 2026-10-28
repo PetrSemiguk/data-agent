@@ -17,6 +17,9 @@ __pycache__/
 data/*
 !data/.gitkeep
 
+# Files uploaded through the web app
+uploads/
+
 # Agent artifacts
 outputs/
 logs/
