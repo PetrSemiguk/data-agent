@@ -18,6 +18,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
 PLACEHOLDER_KEY = "your-api-key-here"
 
+# Code blocks and inline code are shown literally, so $ inside them is left alone.
+CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
+UNESCAPED_DOLLAR = re.compile(r"(?<!\\)\$")
+
+
+def escape_dollars(text: str) -> str:
+    """Escape $ so Streamlit markdown shows money amounts instead of LaTeX math."""
+    parts = CODE_SPAN.split(text)
+    # split() with one capture group puts code spans at odd indexes.
+    return "".join(
+        part if index % 2 else UNESCAPED_DOLLAR.sub(r"\\$", part)
+        for index, part in enumerate(parts)
+    )
+
 
 @st.cache_resource
 def get_client() -> anthropic.Anthropic:
@@ -67,15 +81,16 @@ def load_dataset(uploaded: UploadedFile) -> None:
 
 def show_result(result: RunResult) -> None:
     """Render the outcome of one agent run."""
+    # st.error and st.warning render markdown too, so their text is escaped as well.
     if result.status == "completed":
         st.success("Analysis completed")
     elif result.status == "api_error":
-        st.error(result.error_message or "API error")
+        st.error(escape_dollars(result.error_message or "API error"))
     else:
-        st.warning(f"Stopped ({result.status}): {result.error_message}")
+        st.warning(escape_dollars(f"Stopped ({result.status}): {result.error_message}"))
 
     if result.final_answer:
-        st.markdown(result.final_answer)
+        st.markdown(escape_dollars(result.final_answer))
 
     for chart in result.charts:
         st.image(chart, caption=Path(chart).name)
