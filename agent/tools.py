@@ -149,11 +149,12 @@ UPDATE_PLAN_TOOL: dict[str, Any] = {
     "name": "update_plan",
     "description": (
         "Record your analysis plan and its progress. After get_schema, create a plan of "
-        "3-6 items; then update the statuses as you work. Always send the WHOLE plan, "
-        "not only the changed items. Mark an item 'skipped' only with the reason in "
-        "'note'. Call update_plan in the same response as your other tool calls "
-        "(for example together with run_code), not as a separate step. "
-        "This tool runs no code; it only stores the plan."
+        "3-6 items. Update statuses in the same response as the work on an item: mark it "
+        "in_progress with its first tool call and done with its last one (for example "
+        "together with save_chart). Never spend a separate step only on update_plan; the "
+        "plan must already be closed when you give the final answer. Always send the "
+        "WHOLE plan, not only the changed items. Mark an item 'skipped' only with the "
+        "reason in 'note'. This tool runs no code; it only stores the plan."
     ),
     "input_schema": {
         "type": "object",
