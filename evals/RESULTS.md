@@ -60,14 +60,16 @@ repeats of a question are not independent, so the true uncertainty is larger.
 | dev_hard (`hard_baseline`) | skills on | 10 | 10/10 | 72.2-100% | 10/10 | $0.035 |
 | dev_open (`open_baseline`) | skills on | 8 | 8/8 | 67.6-100% | 8/8 | $0.061 |
 | dev_open (`open_noskills`) | skills off | 8 | 8/8 | 67.6-100% | 8/8 | $0.043 |
-| holdout (`holdout_baseline`, 3 repeats) | skills on | 15 | 15/15 | 79.6-100% | 15/15 | $0.034 |
+| holdout (`holdout_baseline`, 3 repeats) | skills on | 15 | 14/15 [^h05] (15/15 with the Haiku judge) | 70.2-98.8% | 14/15 | $0.034 |
 | **final (`final_exam`)** | **default** | **5** | **5/5** | **56.6-100%** | **4/5** | **$0.036** |
 
-Cost per question = agent + verifier + judge (Haiku). All 79 graded runs passed
-strictly (95% CI 95.4-100%). On holdout one borderline answer (it led with a
-distorted figure and then gave the right one as "the better estimate") failed under
-the Sonnet judge and passes under the Haiku judge; this is the only grade that
-depended on the judge.
+Cost per question = agent + verifier + judge (Haiku). Counted conservatively, 78 of
+the 79 graded runs passed strictly (95% CI 93.2-99.8%); with the Haiku judge on that
+one borderline answer, 79/79.
+
+[^h05]: One borderline holdout answer: the Sonnet judge failed it, the Haiku judge
+passes it, and an independent blind review classified it as an agent error. It is
+counted as a failure here.
 
 ## Experiments
 
@@ -108,7 +110,20 @@ cost $0.061 vs $0.043 per question (+43%). No measurable gain at this n.
 - **Same author.** The questions, the expected answers and the agent were written in
   the same project; questions a different person would ask may be harder.
 - **The judge is not deterministic.** Temperature cannot be set on these models;
-  one borderline holdout grade depended on the judge model.
+  one borderline holdout grade depended on the judge model. The Haiku judge may be
+  more lenient than Sonnet on borderline answers: it passed the one answer that the
+  Sonnet judge and a blind review both counted as a failure.
+- **Grader fixes moved grading towards leniency.** Every grader fix of this stage
+  but one widened what counts as a correct answer: one-item rankings became labels
+  (no ranking direction to misread), a judge report missing a verdict is asked
+  again, a clearly presented result wins over a contradicting side remark, an
+  answer naming several values passes if all of them are acceptable, a product may
+  be named by any of its descriptions or its code, a state by its other name, and a
+  label may have several accepted values. The one fix that tightened grading (an
+  answer that contradicts itself fails) was later relaxed by the "all values
+  acceptable" rule. Each fix is justified on its own, but together they are a
+  systematic shift towards lenient grading. The next question set should be written
+  by someone else, with the grading rules fixed before the agent runs on it.
 - **The verifier does not see charts**; it checks numbers and statements in text only.
 - **Code guard protects against mistakes, not attackers.** It blocks writes, deletes,
   shell, network and reads outside the dataset folders, but can be bypassed on
@@ -118,8 +133,9 @@ cost $0.061 vs $0.043 per question (+43%). No measurable gain at this n.
 ## Conclusions
 
 1. On 79 graded runs over 39 questions, including traps the question does not
-   mention, every answer passed every check; the agent notices incomplete periods,
-   duplicates, service rows, tiny groups and skew on its own.
+   mention, 78 answers passed every check (counted conservatively; the other is a
+   borderline holdout answer); the agent notices incomplete periods, duplicates,
+   service rows, tiny groups and skew on its own.
 2. Skills did not improve accuracy at the measured n and cost about 40% more, so they
    are off by default.
 3. The verifier is accurate (11/12 remarks correct) but mostly cleans up side claims;
