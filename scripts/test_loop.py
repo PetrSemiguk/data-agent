@@ -41,7 +41,7 @@ from agent.events import (  # noqa: E402
     VerificationStarted,
     VerifierEvent,
 )
-from agent.loop import RunResult, build_messages, resume_agent, run_agent  # noqa: E402
+from agent.loop import HistoryTurn, RunResult, action_record, build_messages, resume_agent, run_agent  # noqa: E402
 from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -570,6 +570,39 @@ def main() -> int:
                and calls == ["ask_user", "export_data"] and final.log_path == first.log_path,
                f"pauses: {first.waiting_for} -> {second.waiting_for} -> {final.status}, tool calls={calls}")
         cleanup(final)
+
+        # ah) The next question's history carries the app's record of an approved / denied export
+        records = {}
+        for decision in (True, False):
+            client = FakeClient([
+                make_response([export_use()], "tool_use"),
+                make_response([text("Here is the file." if decision else "The export was denied.")], "end_turn"),
+            ])
+            first = run_agent("Export", sb, client, approve_fn=lambda request: decision)  # type: ignore[arg-type]
+            record = action_record(first)
+            client = FakeClient([make_response([text("Yes.")], "end_turn")])
+            second = run_agent("Did you export a file?", sb, client,  # type: ignore[arg-type]
+                               history=[HistoryTurn("Export", first.final_answer or "", record)])
+            last = client.requests[0][-1]["content"]
+            records[decision] = (last[1]["text"] if isinstance(last, list) and len(last) == 3 else "", first)
+            cleanup(first)
+            cleanup(second)
+        approved_text, approved_run = records[True]
+        denied_text, _ = records[False]
+        report("ah) history records exports",
+               approved_text.startswith("[System record")
+               and "export approved by the user: negative.csv, 3 rows x 2 columns" in approved_text
+               and approved_run.exports[0] in approved_text
+               and "export denied by the user: negative.csv was not written" in denied_text,
+               f"approved: {approved_text.splitlines()[1] if approved_text else '-'} | "
+               f"denied: {denied_text.splitlines()[1] if denied_text else '-'}")
+
+        # ai) The record of an earlier turn precedes the next question; plain pairs still work
+        sent = build_messages("Q3", [HistoryTurn("Q1", "A1", "[System record: x]"), ("Q2", "A2")])
+        report("ai) record goes into the next user message",
+               sent[2]["content"] == [{"type": "text", "text": "[System record: x]"}, {"type": "text", "text": "Q2"}]
+               and sent[1]["content"] == "A1" and [b["text"] for b in sent[-1]["content"]][1:] == ["Q3"],
+               f"roles={[m['role'] for m in sent]}, message 3={sent[2]['content']}")
 
         # ag) Code blocked by the guard never runs; the model gets an error with a hint
         client = FakeClient([

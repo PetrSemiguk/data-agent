@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import anthropic
 import httpx2
@@ -90,6 +90,15 @@ CONTINUATION_NOTE = (
     "variable, check that it exists first with get_schema or dir()."
 )
 
+class HistoryTurn(NamedTuple):
+    """One earlier turn of a chat: the question, the final answer and, if the
+    run did something besides answering (exports, charts), the app's record of it."""
+
+    question: str
+    answer: str
+    record: str | None = None
+
+
 RunStatus = Literal[
     "running",
     "completed",
@@ -153,6 +162,8 @@ class AgentState:
     pending: PendingInteraction | None = None
     charts: list[str] = field(default_factory=list)
     exports: list[str] = field(default_factory=list)
+    # Facts about approvals (exported or denied files), recorded as they happen.
+    actions: list[str] = field(default_factory=list)
     plan: list[dict[str, str]] | None = None
     # What the model is told and offered; the verifier passes its own.
     system: str = SYSTEM_PROMPT
@@ -199,6 +210,8 @@ class RunResult:
     state: AgentState | None = None
     # Data files written by approved export_data calls.
     exports: list[str] = field(default_factory=list)
+    # What the run did besides answering, as written by the app (see action_record).
+    actions: list[str] = field(default_factory=list)
     plan: list[dict[str, str]] | None = None
     # True if the agent answered while plan items were still pending/in progress.
     plan_incomplete: bool = False
@@ -227,7 +240,7 @@ def run_agent(
     dataset_file: str | None = None,
     on_event: EventHandler | None = None,
     pause_on_ask: bool = False,
-    history: list[tuple[str, str]] | None = None,
+    history: list[HistoryTurn] | list[tuple[str, str]] | None = None,
     conversation_id: str | None = None,
     turn: int | None = None,
     verify: bool | None = None,
@@ -235,8 +248,9 @@ def run_agent(
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
-    `history` holds earlier (question, final answer) pairs of the same chat; the
-    last MAX_HISTORY_TURNS of them are sent before the new question. Every
+    `history` holds earlier turns of the same chat as HistoryTurn (or plain
+    (question, final answer) pairs); the last MAX_HISTORY_TURNS of them are sent
+    before the new question, each with the app's record of its actions. Every
     question is still its own run; `conversation_id` and `turn` link the runs of
     one chat in their logs.
 
@@ -325,30 +339,65 @@ def new_state(
     return state
 
 
-def build_messages(question: str, history: list[tuple[str, str]] | None) -> list[dict[str, Any]]:
+def build_messages(
+    question: str, history: list[HistoryTurn] | list[tuple[str, str]] | None
+) -> list[dict[str, Any]]:
     """Start the conversation: recent chat turns as plain messages, then the question.
 
     The note about continuing a chat goes into the new user message rather than
     the system prompt, so the system prompt stays the same for every run.
+    The record of an answer's actions goes into the NEXT user message: it comes
+    from the app, so it is never put into the model's own words.
     """
-    recent = (history or [])[-MAX_HISTORY_TURNS:]
+    recent = [HistoryTurn(*turn) for turn in (history or [])[-MAX_HISTORY_TURNS:]]
     messages: list[dict[str, Any]] = []
-    for past_question, past_answer in recent:
-        messages.append({"role": "user", "content": past_question})
-        messages.append({"role": "assistant", "content": past_answer})
+    previous_record: str | None = None
+    for turn in recent:
+        messages.append({"role": "user", "content": with_record(previous_record, turn.question)})
+        messages.append({"role": "assistant", "content": turn.answer})
+        previous_record = turn.record
     if not recent:
         messages.append({"role": "user", "content": question})
         return messages
-    messages.append(
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": CONTINUATION_NOTE},
-                {"type": "text", "text": question},
-            ],
-        }
-    )
+    content = [{"type": "text", "text": CONTINUATION_NOTE}]
+    if previous_record:
+        content.append({"type": "text", "text": previous_record})
+    content.append({"type": "text", "text": question})
+    messages.append({"role": "user", "content": content})
     return messages
+
+
+def with_record(record: str | None, text: str) -> str | list[dict[str, str]]:
+    """A user message, preceded by the record of the answer before it, if any."""
+    if not record:
+        return text
+    return [{"type": "text", "text": record}, {"type": "text", "text": text}]
+
+
+def action_record(result: RunResult) -> str | None:
+    """The app's record of what a finished run did besides answering, for the chat history.
+
+    Built from facts the loop saw (approvals, written files), not from the
+    model's text, so the next run can rely on it. None if there is nothing to record.
+    """
+    lines = list(result.actions)
+    lines += [f"chart saved: {Path(chart).name} at {chart}" for chart in result.charts]
+    if not lines:
+        return None
+    body = "\n".join(f"- {line}" for line in lines)
+    return f"[System record of the actions in your previous answer, written by the app:\n{body}]"
+
+
+def describe_approval(request: ApprovalRequest, approved: bool, automatic: bool, file_path: str | None) -> str:
+    """One line for the record of an export decision."""
+    name = Path(request.path).name
+    if approved and file_path:
+        return f"export approved by the user: {Path(file_path).name}, {request.details['Size']}, written to {file_path}"
+    if approved:
+        return f"export approved by the user but it failed: {name} was not written"
+    if automatic:
+        return f"export denied automatically (no user available): {name} was not written"
+    return f"export denied by the user: {name} was not written"
 
 
 def resume_agent(
@@ -383,6 +432,7 @@ def resume_agent(
         start = time.perf_counter()
         output, is_error, file_path = resolve_approval(pending.request, reply, ctx)
         state.code_seconds += time.perf_counter() - start
+        state.actions.append(describe_approval(pending.request, reply, False, file_path))
         pending.log_entry["approval"]["decision"] = "approved" if reply else "denied"
         emit(
             ApprovalResolved(
@@ -415,6 +465,7 @@ def approve_now(
     step: int,
     log_entry: dict[str, Any],
     emit: EventHandler,
+    actions: list[str],
 ) -> tuple[str, bool]:
     """Decide an approval without pausing: ask `approve_fn`, or deny if there is no human."""
     ctx.approvals_requested += 1
@@ -422,6 +473,7 @@ def approve_now(
     automatic = approve_fn is None
     approved = approve_fn(request) if approve_fn is not None else False
     output, is_error, file_path = resolve_approval(request, approved, ctx, automatic)
+    actions.append(describe_approval(request, approved, automatic, file_path))
     log_entry["approval"]["decision"] = "approved" if approved else ("auto-denied" if automatic else "denied")
     emit(
         ApprovalResolved(
@@ -564,7 +616,7 @@ def continue_run(
                             )
                             outcome = None
                         else:
-                            outcome = approve_now(prepared, approve_fn, ctx, step, log_entry, emit)
+                            outcome = approve_now(prepared, approve_fn, ctx, step, log_entry, emit, state.actions)
                     else:
                         outcome = prepared
                 else:
@@ -679,6 +731,7 @@ def continue_run(
             warnings=warnings,
             charts=state.charts,
             exports=state.exports,
+            actions=state.actions,
             verification=asdict(report) if report else None,
             draft_answer=state.draft_answer,
             revised=revised,
@@ -715,6 +768,7 @@ def continue_run(
             approval=pending_now.request if pending_now else None,
             state=state if pending_now else None,
             exports=list(state.exports),
+            actions=list(state.actions),
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
             verification=report,

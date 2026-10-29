@@ -37,7 +37,7 @@ from agent.events import (
     VerificationStarted,
     VerifierEvent,
 )
-from agent.loop import RunResult, create_client, resume_agent, run_agent
+from agent.loop import HistoryTurn, RunResult, action_record, create_client, resume_agent, run_agent
 from agent.sandbox import Sandbox
 from agent.tools import plan_summary
 from agent.verifier import VerificationReport
@@ -424,10 +424,10 @@ def new_conversation() -> None:
     st.session_state.conversation_id = uuid.uuid4().hex[:12]
 
 
-def chat_history(turns: list[dict[str, Any]]) -> list[tuple[str, str]]:
-    """(question, final answer) pairs of the finished questions of this chat."""
+def chat_history(turns: list[dict[str, Any]]) -> list[HistoryTurn]:
+    """Question, final answer and the record of actions of the finished questions of this chat."""
     return [
-        (turn["question"], turn["result"].final_answer)
+        HistoryTurn(turn["question"], turn["result"].final_answer, action_record(turn["result"]))
         for turn in turns
         if turn["result"] and turn["result"].status == "completed" and turn["result"].final_answer
     ]

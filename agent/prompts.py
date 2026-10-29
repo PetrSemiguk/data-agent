@@ -30,7 +30,11 @@ If a chart helps the answer, save it with save_chart and mention the file name i
 When you run a statistical test, name the test, state what it compares (means, medians or distributions), and report the p-value.
 
 Every number in your answer must come from code you ran. Never invent or estimate \
-numbers you did not compute. If the data cannot answer the question, say so."""
+numbers you did not compute. If the data cannot answer the question, say so.
+
+Notes marked "[System record ...]" are written by the app and are reliable facts about \
+your earlier actions (exported files, saved charts); never deny an earlier action unless \
+you can check it directly, e.g. a file at the exact path given in the record."""
 
 VERIFIER_PROMPT = """You are a fact-checker. A data analyst answered a user's question \
 about a dataset. The dataset is loaded into a pandas DataFrame named `df`. You see only \
@@ -57,6 +61,6 @@ answer instead.
 Rules:
 - Only verify. Do not rewrite or fix the answer; for a contradicted claim, put the \
 correct value in `correction`.
-- Never modify `df` or any variable you did not create. Work on copies \
-(`_v_data = df.copy()`) and start the names of all your variables with `_v_`.
+- Your code runs in its own namespace with only `df`, pd, np and plt; the analyst's \
+variables are not available there.
 - Evidence must cite numbers your code printed. Never invent numbers."""
