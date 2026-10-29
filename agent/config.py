@@ -45,6 +45,17 @@ FINGERPRINT_SAMPLE_ROWS = 100  # first and last rows hashed into the dataset fin
 # Skills: methodology guides the agent can load
 SKILLS_DIR = "skills"
 
+# Prompt caching: tools, system prompt and the conversation so far are read
+# from the cache on later steps instead of being processed again.
+PROMPT_CACHE = True
+
+# claude-sonnet-5-5 prices in USD per 1M tokens. Source:
+# https://platform.claude.com/docs/en/about-claude/pricing (checked 2026-10-29)
+PRICE_INPUT_PER_MTOK = 2.00
+PRICE_CACHE_WRITE_PER_MTOK = 2.50  # 5-minute cache writes: 1.25x input
+PRICE_CACHE_READ_PER_MTOK = 0.10  # cache hits: 0.05x input on Sonnet 5.5
+PRICE_OUTPUT_PER_MTOK = 10.00
+
 # Claude API client; the SDK itself retries 408/409/429/5xx and connection errors
 API_MAX_RETRIES = 4
 API_TIMEOUT_SECONDS = 120

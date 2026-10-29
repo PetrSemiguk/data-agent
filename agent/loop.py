@@ -23,6 +23,7 @@ from agent.config import (
     MAX_STEPS,
     MAX_TOTAL_TOKENS,
     OUTPUTS_DIR,
+    PROMPT_CACHE,
     VERIFY_ANSWERS,
 )
 from agent.events import (
@@ -51,6 +52,7 @@ from agent.events import (
 from agent.memory import DatasetMemory, MemoryFullError, memory_context
 from agent.prompts import SKILLS_PROMPT, SYSTEM_PROMPT
 from agent.skills_loader import Skill, skills_list
+from agent.usage import cost_usd, usage_counts
 from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
@@ -156,6 +158,10 @@ class AgentState:
     step: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    # Mark the prompt for caching (tools + system, and the conversation so far).
+    cache: bool = True
     api_seconds: float = 0.0
     code_seconds: float = 0.0
     # Time the agent actually worked; waiting for the human is not counted.
@@ -219,6 +225,11 @@ class RunResult:
     duration_s: float
     charts: list[str] = field(default_factory=list)
     log_path: str | None = None
+    # input_tokens is the uncached part; the whole prompt also includes these.
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    # Price of every token of the run, the verification included.
+    cost_usd: float = 0.0
     waiting_for: InteractionKind | None = None
     question: str | None = None
     options: list[str] | None = None
@@ -270,6 +281,7 @@ def run_agent(
     approve_fn: ApproveFn | None = None,
     memory: DatasetMemory | None = None,
     skills: dict[str, Skill] | None = None,
+    cache: bool | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -296,6 +308,9 @@ def run_agent(
 
     With `skills`, their names and descriptions are added to the system prompt
     and the agent gets the load_skill tool.
+
+    With `cache` (default PROMPT_CACHE), the prompt is marked for caching, so
+    later steps read tools, system prompt and history from the cache.
 
     With `verify` (default VERIFY_ANSWERS), a final answer that contains numbers
     is checked by the verifier; if it contradicts claims, the agent gets the
@@ -324,6 +339,7 @@ def run_agent(
         system=SYSTEM_PROMPT + SKILLS_PROMPT.format(skills=skills_list(skills)) if skills else SYSTEM_PROMPT,
         tools=[*TOOLS, *([LOAD_SKILL_TOOL] if skills else []), *([REMEMBER_TOOL] if memory else [])],
         skills=skills or None,
+        cache=PROMPT_CACHE if cache is None else cache,
         memory=memory,
         memory_note_ids=[note.id for note in notes],
     )
@@ -569,13 +585,12 @@ def continue_run(
                 status = "max_steps"
                 error_message = f"Reached the limit of {state.max_steps} steps without a final answer."
                 break
-            # Stop before spending more once the budget is used up.
-            if state.input_tokens + state.output_tokens >= MAX_TOTAL_TOKENS:
+            # Stop before spending more once the budget is used up. Cached tokens
+            # count too: they are still processed, only cheaper.
+            used = state.input_tokens + state.cache_write_tokens + state.cache_read_tokens + state.output_tokens
+            if used >= MAX_TOTAL_TOKENS:
                 status = "budget_exceeded"
-                error_message = (
-                    f"Token budget exceeded: {state.input_tokens + state.output_tokens} tokens "
-                    f"used, limit is {MAX_TOTAL_TOKENS}."
-                )
+                error_message = f"Token budget exceeded: {used} tokens used, limit is {MAX_TOTAL_TOKENS}."
                 break
 
             state.step += 1
@@ -584,7 +599,7 @@ def continue_run(
             start = time.perf_counter()
             try:
                 response = stream_message(
-                    client, state.model, state.system, state.tools, state.messages, step, emit
+                    client, state.model, state.system, state.tools, state.messages, step, emit, state.cache
                 )
             except (anthropic.AnthropicError, *STREAM_BROKEN_ERRORS) as exc:
                 state.api_seconds += time.perf_counter() - start
@@ -593,22 +608,29 @@ def continue_run(
                 break
             elapsed = time.perf_counter() - start
             state.api_seconds += elapsed
-            state.input_tokens += response.usage.input_tokens
-            state.output_tokens += response.usage.output_tokens
+            tokens_in, cache_write, cache_read, tokens_out = usage_counts(response.usage)
+            state.input_tokens += tokens_in
+            state.cache_write_tokens += cache_write
+            state.cache_read_tokens += cache_read
+            state.output_tokens += tokens_out
             emit(
                 ApiCallFinished(
                     step=step,
                     duration_s=elapsed,
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
+                    input_tokens=tokens_in,
+                    output_tokens=tokens_out,
+                    cache_write_tokens=cache_write,
+                    cache_read_tokens=cache_read,
                 )
             )
 
             step_log: dict[str, Any] = {
                 "step": step,
                 "api_duration_s": round(elapsed, 2),
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
+                "input_tokens": tokens_in,
+                "cache_write_tokens": cache_write,
+                "cache_read_tokens": cache_read,
+                "output_tokens": tokens_out,
                 "assistant_text": extract_text(response.content),
                 "tool_calls": [],
             }
@@ -793,6 +815,10 @@ def continue_run(
         # Totals include the verifier's run; its own share is listed separately.
         verify_in = report.input_tokens if report else 0
         verify_out = report.output_tokens if report else 0
+        verify_write = report.cache_write_tokens if report else 0
+        verify_read = report.cache_read_tokens if report else 0
+        verify_cost = report.cost_usd if report else 0.0
+        agent_cost = cost_usd(state.input_tokens, state.cache_write_tokens, state.cache_read_tokens, state.output_tokens)
         state.log.update(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
@@ -811,15 +837,29 @@ def continue_run(
             totals={
                 "steps": len(step_logs),
                 "input_tokens": state.input_tokens + verify_in,
+                "cache_write_tokens": state.cache_write_tokens + verify_write,
+                "cache_read_tokens": state.cache_read_tokens + verify_read,
                 "output_tokens": state.output_tokens + verify_out,
+                "cost_usd": round(agent_cost + verify_cost, 5),
                 "duration_s": round(state.active_seconds, 2),
                 "api_duration_s": round(state.api_seconds, 2),
                 "code_duration_s": round(state.code_seconds, 2),
+                "agent": {
+                    "input_tokens": state.input_tokens,
+                    "cache_write_tokens": state.cache_write_tokens,
+                    "cache_read_tokens": state.cache_read_tokens,
+                    "output_tokens": state.output_tokens,
+                    "cost_usd": round(agent_cost, 5),
+                },
                 "verification": {
                     "input_tokens": verify_in,
+                    "cache_write_tokens": verify_write,
+                    "cache_read_tokens": verify_read,
                     "output_tokens": verify_out,
+                    "cost_usd": round(verify_cost, 5),
                     "duration_s": report.duration_s if report else 0.0,
                 },
+                "prompt_cache": state.cache,
             },
         )
         write_log(state.log_path, state.log)
@@ -834,6 +874,9 @@ def continue_run(
             duration_s=round(state.active_seconds, 2),
             charts=state.charts,
             log_path=state.log_path.as_posix(),
+            cache_write_tokens=state.cache_write_tokens + verify_write,
+            cache_read_tokens=state.cache_read_tokens + verify_read,
+            cost_usd=agent_cost + verify_cost,
             waiting_for=pending_now.kind if pending_now else None,
             question=pending_now.question if pending_now else None,
             options=pending_now.options if pending_now else None,
@@ -974,6 +1017,7 @@ def verify_final_answer(
             state.model,
             on_event=lambda event: emit(VerifierEvent(event=event)),
             notes=facts,
+            cache=state.cache,
         )
         for note, check in zip(facts, report.note_checks):
             note["check"] = {"status": check.status, "evidence": check.evidence, "correction": check.correction}
@@ -1038,21 +1082,36 @@ def stream_message(
     messages: list[dict[str, Any]],
     step: int,
     emit: EventHandler,
+    cache: bool = False,
 ) -> Any:
     """Stream one model turn, reporting text deltas, and return the final message.
 
     Opening the stream is retried by the SDK. A connection that breaks while the
     stream is being read is not, so this function retries the whole turn itself.
+
+    With `cache`, two cache breakpoints are set (the API allows 4):
+    - on the system prompt: tools render before it, so tools + system are cached
+      together; this part is the same on every step of the run, and in other
+      runs with the same tools and skills list;
+    - automatic (top-level cache_control): on the last block of the messages, so
+      the next step reads the whole conversation so far, loaded skills included,
+      and writes only what this step added.
     """
+    request: dict[str, Any] = {"system": system}
+    if cache:
+        request = {
+            "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+            "cache_control": {"type": "ephemeral"},
+        }
     for attempt in range(API_MAX_RETRIES + 1):
         stream_open = False
         try:
             with client.messages.stream(
                 model=model,
                 max_tokens=4096,
-                system=system,
                 tools=tools,
                 messages=messages,
+                **request,
             ) as stream:
                 stream_open = True
                 for event in stream:

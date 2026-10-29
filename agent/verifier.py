@@ -49,6 +49,10 @@ class VerificationReport:
     # Checks of the memory notes sent along with the answer, one per note, in
     # the same order. They do not count in `status` and `counts` above.
     note_checks: list[ClaimCheck] = field(default_factory=list)
+    # input_tokens is the uncached part; the whole prompt also includes these.
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 def verification_request(question: str, answer: str, notes: list[dict[str, Any]] | None = None) -> str:
@@ -104,6 +108,7 @@ def verify_answer(
     max_steps: int = VERIFY_MAX_STEPS,
     on_event: EventHandler | None = None,
     notes: list[dict[str, Any]] | None = None,
+    cache: bool = True,
 ) -> VerificationReport:
     """Recompute the claims of `answer` with code in a fresh model context.
 
@@ -124,6 +129,7 @@ def verify_answer(
         tools=VERIFIER_TOOLS,
         finish_tool=REPORT_VERIFICATION_TOOL["name"],
         namespace=VERIFIER_NAMESPACE,
+        cache=cache,
     )
     try:
         result = continue_run(state, sandbox, client, safe_emitter(on_event), None, pause_on_ask=False)
@@ -161,6 +167,9 @@ def verify_answer(
         error_message=error_message,
         log_path=result.log_path,
         note_checks=note_checks,
+        cache_write_tokens=result.cache_write_tokens,
+        cache_read_tokens=result.cache_read_tokens,
+        cost_usd=result.cost_usd,
     )
     state.log["verification"] = asdict(report)
     write_log(state.log_path, state.log)

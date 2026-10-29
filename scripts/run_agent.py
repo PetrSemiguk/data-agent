@@ -57,6 +57,11 @@ def main() -> int:
         action="store_true",
         help="Do not offer skills (methodology guides) to the agent",
     )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Do not use prompt caching (to compare the cost)",
+    )
     args = parser.parse_args()
     # Symbols such as ✔ may not exist in the console encoding; print '?' instead of failing.
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
@@ -90,6 +95,7 @@ def main() -> int:
             approve_fn=None if args.non_interactive else console_approve,
             memory=memory,
             skills=skills,
+            cache=False if args.no_cache else None,
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
@@ -102,7 +108,8 @@ def main() -> int:
             print(f"(Unrevised draft. {result.verification_warning})")
         print(f"\n{result.final_answer}")
     print(
-        f"\nSteps: {result.steps}, tokens in={result.input_tokens} out={result.output_tokens}, "
+        f"\nSteps: {result.steps}, tokens in={result.input_tokens} cache_write={result.cache_write_tokens} "
+        f"cache_read={result.cache_read_tokens} out={result.output_tokens}, cost ${result.cost_usd:.4f}, "
         f"time {result.duration_s:.1f}s"
     )
     for path in result.exports:

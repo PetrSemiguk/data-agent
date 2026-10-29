@@ -61,6 +61,7 @@ class ConsolePrinter:
                 self._end_line()
                 print(
                     f"[API call: {event.duration_s:.1f}s, tokens in={event.input_tokens} "
+                    f"cache_write={event.cache_write_tokens} cache_read={event.cache_read_tokens} "
                     f"out={event.output_tokens}]"
                 )
             case AssistantText(text=text):
@@ -136,7 +137,9 @@ class ConsolePrinter:
                     print(f"[Warning] {result.verification_warning} (revision stopped: {result.status})")
                 print(
                     f"\n{SEPARATOR}\n"
-                    f"Tokens used: input={result.input_tokens}, output={result.output_tokens}"
+                    f"Tokens used: input={result.input_tokens}, cache_write={result.cache_write_tokens}, "
+                    f"cache_read={result.cache_read_tokens}, output={result.output_tokens}; "
+                    f"cost ${result.cost_usd:.4f}"
                 )
                 print(
                     f"Time: total={result.duration_s:.1f}s, API={event.api_duration_s:.1f}s, "
@@ -145,7 +148,9 @@ class ConsolePrinter:
                 if result.verification is not None:
                     print(
                         f"  of them verification: input={result.verification.input_tokens}, "
-                        f"output={result.verification.output_tokens}"
+                        f"cache_write={result.verification.cache_write_tokens}, "
+                        f"cache_read={result.verification.cache_read_tokens}, "
+                        f"output={result.verification.output_tokens}; cost ${result.verification.cost_usd:.4f}"
                     )
                 print(f"Saved charts ({len(result.charts)}):")
                 for chart in result.charts:

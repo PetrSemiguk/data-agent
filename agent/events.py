@@ -28,8 +28,11 @@ class StepStarted:
 class ApiCallFinished:
     step: int
     duration_s: float
+    # Uncached input only; the whole prompt is input + cache write + cache read.
     input_tokens: int
     output_tokens: int
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 @dataclass(frozen=True)

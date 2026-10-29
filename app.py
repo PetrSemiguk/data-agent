@@ -214,6 +214,7 @@ class StepRenderer:
             case ApiCallFinished() if self.caption_slot:
                 self.caption_slot.caption(
                     f"API call {event.duration_s:.1f} s · tokens in {event.input_tokens:,} "
+                    f"· cache write {event.cache_write_tokens:,} · cache read {event.cache_read_tokens:,} "
                     f"· out {event.output_tokens:,}"
                 )
             case AssistantText(text=text) if self.box:
@@ -392,8 +393,10 @@ def show_result(result: RunResult) -> None:
                 width="stretch",
             )
             st.caption(
-                f"Check: {report.steps} steps · tokens {report.input_tokens:,} in / "
-                f"{report.output_tokens:,} out · {report.duration_s:.1f} s · log: {report.log_path}"
+                f"Check: {report.steps} steps · tokens {report.input_tokens:,} in · "
+                f"{report.cache_write_tokens:,} cache write · {report.cache_read_tokens:,} cache read · "
+                f"{report.output_tokens:,} out · \\${report.cost_usd:.3f} · {report.duration_s:.1f} s · "
+                f"log: {report.log_path}"
             )
 
     if result.final_answer:
@@ -425,7 +428,8 @@ def show_result(result: RunResult) -> None:
             )
 
     st.caption(
-        f"{result.steps} steps · tokens {result.input_tokens:,} in / {result.output_tokens:,} out "
+        f"{result.steps} steps · tokens {result.input_tokens:,} in · {result.cache_write_tokens:,} cache write "
+        f"· {result.cache_read_tokens:,} cache read · {result.output_tokens:,} out · \\${result.cost_usd:.3f} "
         f"· {result.duration_s:.1f} s · log: {result.log_path}"
     )
 
@@ -468,7 +472,16 @@ def memory_sidebar(store: MemoryStore, fingerprint: str) -> None:
 
 
 def turn_tokens(turns: list[dict[str, Any]]) -> int:
-    return sum(t["result"].input_tokens + t["result"].output_tokens for t in turns if t["result"])
+    """All tokens of the finished turns, cached ones included."""
+    return sum(
+        r.input_tokens + r.cache_write_tokens + r.cache_read_tokens + r.output_tokens
+        for r in (t["result"] for t in turns)
+        if r
+    )
+
+
+def turn_cost(turns: list[dict[str, Any]]) -> float:
+    return sum(t["result"].cost_usd for t in turns if t["result"])
 
 
 def new_conversation() -> None:
@@ -476,6 +489,7 @@ def new_conversation() -> None:
     old_turns = st.session_state.get("turns", [])
     st.session_state.past_questions = st.session_state.get("past_questions", 0) + len(old_turns)
     st.session_state.past_tokens = st.session_state.get("past_tokens", 0) + turn_tokens(old_turns)
+    st.session_state.past_cost = st.session_state.get("past_cost", 0.0) + turn_cost(old_turns)
     st.session_state.turns = []
     st.session_state.conversation_id = uuid.uuid4().hex[:12]
 
@@ -570,7 +584,8 @@ with st.sidebar:
     turns: list[dict[str, Any]] = st.session_state.turns
     questions = st.session_state.past_questions + len(turns)
     tokens = st.session_state.past_tokens + turn_tokens(turns)
-    st.caption(f"This session: {questions} questions · {tokens:,} tokens")
+    cost = st.session_state.get("past_cost", 0.0) + turn_cost(turns)
+    st.caption(f"This session: {questions} questions · {tokens:,} tokens · \\${cost:.3f}")
 
 if not turns:
     st.info("Upload a dataset in the sidebar, then ask your first question below.")

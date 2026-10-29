@@ -21,6 +21,10 @@ from agent.config import (  # noqa: E402
     MAX_TOTAL_TOKENS,
     MAX_USER_QUESTIONS,
     OUTPUTS_DIR,
+    PRICE_CACHE_READ_PER_MTOK,
+    PRICE_CACHE_WRITE_PER_MTOK,
+    PRICE_INPUT_PER_MTOK,
+    PRICE_OUTPUT_PER_MTOK,
 )
 import agent.loop  # noqa: E402
 from agent.events import (  # noqa: E402
@@ -46,6 +50,7 @@ from agent.events import (  # noqa: E402
 from agent.loop import HistoryTurn, RunResult, action_record, build_messages, resume_agent, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore  # noqa: E402
 from agent.skills_loader import load_skills  # noqa: E402
+from agent.usage import cost_usd  # noqa: E402
 from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -63,12 +68,24 @@ def report(name: str, ok: bool, details: str) -> None:
     print(f"       {details}")
 
 
-def make_response(blocks: list[Any], stop_reason: str, tokens_in: int = 100, tokens_out: int = 20) -> Any:
+def make_response(
+    blocks: list[Any],
+    stop_reason: str,
+    tokens_in: int = 100,
+    tokens_out: int = 20,
+    cache_write: int = 0,
+    cache_read: int = 0,
+) -> Any:
     """A minimal stand-in for anthropic's Message object."""
     return SimpleNamespace(
         content=blocks,
         stop_reason=stop_reason,
-        usage=SimpleNamespace(input_tokens=tokens_in, output_tokens=tokens_out),
+        usage=SimpleNamespace(
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
+            cache_creation_input_tokens=cache_write,
+            cache_read_input_tokens=cache_read,
+        ),
     )
 
 
@@ -168,6 +185,7 @@ class FakeClient:
         self.calls = 0
         self.requests: list[list[Any]] = []
         self.systems: list[str] = []
+        self.kwargs: list[dict[str, Any]] = []
         self.tools: list[list[str]] = []
         self.messages = self
 
@@ -175,7 +193,10 @@ class FakeClient:
         self.calls += 1
         # A copy of what the model would see on this call.
         self.requests.append(list(kwargs["messages"]))
-        self.systems.append(kwargs["system"])
+        self.kwargs.append(kwargs)
+        # With caching the system prompt is a list of blocks; keep its text for checks.
+        system = kwargs["system"]
+        self.systems.append(system if isinstance(system, str) else "".join(b["text"] for b in system))
         self.tools.append([tool["name"] for tool in kwargs["tools"]])
         reply = self.replies.pop(0) if self.replies else self.repeat
         return FakeStream(reply)
@@ -811,6 +832,60 @@ def main() -> int:
         report("au) verifier gets no skills",
                "load_skill" not in client.tools[1] and "Available skills" not in client.systems[1],
                f"verifier tools={client.tools[1]}")
+        cleanup(result)
+
+        # av) Prompt caching: breakpoints on the system prompt and on the conversation;
+        #     cache tokens are summed separately and priced at their own rates
+        events = []
+        client = FakeClient([
+            make_response([tool_use("print(1)")], "tool_use", tokens_in=50, tokens_out=20, cache_write=3000),
+            make_response([text("Done.")], "end_turn", tokens_in=40, tokens_out=10, cache_write=200, cache_read=3000),
+        ])
+        result = run_agent("Q", sb, client, cache=True, on_event=events.append)  # type: ignore[arg-type]
+        log = read_log(result)
+        sent = client.kwargs[0]
+        calls = [e for e in events if isinstance(e, ApiCallFinished)]
+        expected_cost = (90 * PRICE_INPUT_PER_MTOK + 3200 * PRICE_CACHE_WRITE_PER_MTOK
+                         + 3000 * PRICE_CACHE_READ_PER_MTOK + 30 * PRICE_OUTPUT_PER_MTOK) / 1_000_000
+        report("av) prompt caching marks the prompt and counts cache tokens",
+               sent["system"][0]["cache_control"] == {"type": "ephemeral"}
+               and sent["cache_control"] == {"type": "ephemeral"}
+               and result.input_tokens == 90 and result.cache_write_tokens == 3200
+               and result.cache_read_tokens == 3000 and result.output_tokens == 30
+               and abs(result.cost_usd - expected_cost) < 1e-12
+               and [c.cache_read_tokens for c in calls] == [0, 3000]
+               and log is not None and log["totals"]["cache_read_tokens"] == 3000
+               and log["totals"]["agent"]["cache_write_tokens"] == 3200
+               and log["steps"][1]["cache_read_tokens"] == 3000
+               and abs(log["totals"]["cost_usd"] - round(expected_cost, 5)) < 1e-9,
+               f"in={result.input_tokens} write={result.cache_write_tokens} read={result.cache_read_tokens} "
+               f"out={result.output_tokens}, cost=${result.cost_usd:.6f}")
+        cleanup(result)
+
+        # aw) --no-cache: a plain system prompt and no cache_control at all
+        client = FakeClient([make_response([text("Done.")], "end_turn")])
+        result = run_agent("Q", sb, client, cache=False)  # type: ignore[arg-type]
+        sent = client.kwargs[0]
+        report("aw) no cache -> no cache_control",
+               isinstance(sent["system"], str) and "cache_control" not in sent,
+               f"system is {type(sent['system']).__name__}, keys={sorted(sent)}")
+        cleanup(result)
+
+        # ax) The verifier caches too, and its tokens and cost are added to the run's
+        client = FakeClient([
+            make_response([text("Revenue is 10.")], "end_turn", tokens_in=100, tokens_out=10),
+            make_response([report_use([CLAIM_OK])], "tool_use", tokens_in=20, tokens_out=5,
+                          cache_write=1000, cache_read=500),
+        ])
+        result = run_agent("Q", sb, client, cache=True, verify=True)  # type: ignore[arg-type]
+        v = result.verification
+        report("ax) verifier cached and counted",
+               client.kwargs[1]["cache_control"] == {"type": "ephemeral"} and v is not None
+               and v.cache_write_tokens == 1000 and v.cache_read_tokens == 500
+               and result.cache_write_tokens == 1000 and result.input_tokens == 120
+               and abs(result.cost_usd - (cost_usd(100, 0, 0, 10) + v.cost_usd)) < 1e-12,
+               f"verifier: write={v.cache_write_tokens if v else '-'} read={v.cache_read_tokens if v else '-'} "
+               f"cost=${v.cost_usd if v else 0:.6f}; run cost=${result.cost_usd:.6f}")
         cleanup(result)
 
         # g) A crashing event handler does not break the run
