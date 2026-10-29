@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
+from agent.tools import ApprovalRequest  # noqa: E402
 
 
 def console_ask_user(question: str, options: list[str] | None) -> str:
@@ -24,6 +25,11 @@ def console_ask_user(question: str, options: list[str] | None) -> str:
     return input(f"{hint} (empty = agent decides): ")
 
 
+def console_approve(request: ApprovalRequest) -> bool:
+    """Ask the human to approve a risky action; ConsolePrinter has already shown it."""
+    return input("Approve? [y/N]: ").strip().lower() in ("y", "yes")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ask the data agent a question about a dataset.")
     parser.add_argument("--file", required=True, help="Path to a CSV or XLSX file")
@@ -31,7 +37,8 @@ def main() -> int:
     parser.add_argument(
         "--non-interactive",
         action="store_true",
-        help="Never ask the user; the agent must make and state its own assumptions",
+        help="Never ask the user; the agent must make and state its own assumptions "
+        "(approvals such as exports are denied automatically)",
     )
     parser.add_argument(
         "--no-verify",
@@ -57,6 +64,7 @@ def main() -> int:
             dataset_file=args.file,
             on_event=ConsolePrinter(),
             verify=False if args.no_verify else None,
+            approve_fn=None if args.non_interactive else console_approve,
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
@@ -72,6 +80,8 @@ def main() -> int:
         f"\nSteps: {result.steps}, tokens in={result.input_tokens} out={result.output_tokens}, "
         f"time {result.duration_s:.1f}s"
     )
+    for path in result.exports:
+        print(f"Exported file: {path}")
     print(f"Log: {result.log_path}")
     return 0 if result.status == "completed" else 1
 

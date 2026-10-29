@@ -28,6 +28,8 @@ from agent.config import (
 from agent.events import (
     AnswerRevised,
     ApiCallFinished,
+    ApprovalRequested,
+    ApprovalResolved,
     AssistantText,
     Event,
     EventHandler,
@@ -49,14 +51,19 @@ from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
+    EXPORT_DATA_TOOL,
     TOOLS,
     UPDATE_PLAN_TOOL,
+    ApprovalRequest,
+    ApproveFn,
     AskUserFn,
     ToolContext,
     answer_for_model,
     check_ask_user,
     execute_tool,
+    prepare_export,
     resolve_answer,
+    resolve_approval,
 )
 
 if TYPE_CHECKING:
@@ -94,15 +101,26 @@ RunStatus = Literal[
 ]
 
 
+InteractionKind = Literal["question", "approval"]
+
+
 @dataclass
-class PendingQuestion:
-    """An ask_user call the run is paused on."""
+class PendingInteraction:
+    """A tool call the run is paused on until the human responds.
+
+    Two kinds share one pause/resume mechanism:
+    - "question" (ask_user): the human answers with text or picks an option;
+    - "approval" (a risky action such as export_data): the human approves or
+      denies the prepared `request`.
+    """
 
     tool_use_id: str
-    question: str
-    options: list[str] | None
-    # The JSON-log entry of this call, completed when the answer arrives.
+    kind: InteractionKind
+    # The JSON-log entry of this call, completed when the human responds.
     log_entry: dict[str, Any]
+    question: str | None = None
+    options: list[str] | None = None
+    request: ApprovalRequest | None = None
 
 
 @dataclass
@@ -129,10 +147,12 @@ class AgentState:
     # Time the agent actually worked; waiting for the human is not counted.
     active_seconds: float = 0.0
     questions_asked: int = 0
-    # Results of the other tools from the step that asked; sent with the answer.
+    approvals_requested: int = 0
+    # Results of the other tools from the step that paused; sent with the response.
     pending_tool_results: list[dict[str, Any]] = field(default_factory=list)
-    pending_question: PendingQuestion | None = None
+    pending: PendingInteraction | None = None
     charts: list[str] = field(default_factory=list)
+    exports: list[str] = field(default_factory=list)
     plan: list[dict[str, str]] | None = None
     # What the model is told and offered; the verifier passes its own.
     system: str = SYSTEM_PROMPT
@@ -158,8 +178,9 @@ class AgentState:
 class RunResult:
     """Outcome of one agent run; returned instead of raising on API problems.
 
-    With status "waiting_for_user" the run is paused: show `question` and
-    `options` to the human, then call `resume_agent(state, answer, ...)`.
+    With status "waiting_for_user" the run is paused; `waiting_for` says on what:
+    - "question": show `question` and `options`, then `resume_agent(state, answer, ...)`;
+    - "approval": show `approval`, then `resume_agent(state, True or False, ...)`.
     """
 
     status: RunStatus
@@ -171,9 +192,13 @@ class RunResult:
     duration_s: float
     charts: list[str] = field(default_factory=list)
     log_path: str | None = None
+    waiting_for: InteractionKind | None = None
     question: str | None = None
     options: list[str] | None = None
+    approval: ApprovalRequest | None = None
     state: AgentState | None = None
+    # Data files written by approved export_data calls.
+    exports: list[str] = field(default_factory=list)
     plan: list[dict[str, str]] | None = None
     # True if the agent answered while plan items were still pending/in progress.
     plan_incomplete: bool = False
@@ -206,6 +231,7 @@ def run_agent(
     conversation_id: str | None = None,
     turn: int | None = None,
     verify: bool | None = None,
+    approve_fn: ApproveFn | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -219,6 +245,9 @@ def run_agent(
     - `pause_on_ask=True`: the run returns status "waiting_for_user" and is
       continued with `resume_agent` (web UI, which cannot block);
     - neither: the agent is told the user is not available and must assume.
+    Risky actions (export_data) need approval the same way: `approve_fn` blocks
+    until the human decides, `pause_on_ask=True` pauses the run, and without
+    either the action is denied automatically.
     `on_event` receives progress events; the loop itself prints nothing.
     API errors do not raise: they end the run with status "api_error".
 
@@ -243,7 +272,7 @@ def run_agent(
     )
     assert state.output_dir is not None
     emit(RunStarted(run_id=state.run_id, output_dir=state.output_dir.as_posix(), log_path=state.log_path.as_posix()))
-    return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
+    return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask, approve_fn)
 
 
 def new_state(
@@ -324,34 +353,82 @@ def build_messages(question: str, history: list[tuple[str, str]] | None) -> list
 
 def resume_agent(
     state: AgentState,
-    answer: str,
+    reply: str | bool,
     sandbox: Sandbox,
     client: anthropic.Anthropic,
     on_event: EventHandler | None = None,
 ) -> RunResult:
-    """Continue a run paused on a question; an empty answer lets the agent decide.
+    """Continue a paused run with the human's response.
 
-    Uses the same run id, log, step numbers and limits as the original run.
+    A question is answered with text (empty lets the agent decide); an approval
+    with True (approve) or False (deny). Uses the same run id, log, step numbers
+    and limits as the original run.
     """
-    pending = state.pending_question
+    pending = state.pending
     if pending is None:
-        raise ValueError("This run is not waiting for an answer.")
+        raise ValueError("This run is not waiting for the user.")
     emit = safe_emitter(on_event)
 
-    resolved = resolve_answer(answer, pending.options)
-    output = answer_for_model(resolved)
+    is_error = False
+    if pending.kind == "question":
+        if not isinstance(reply, str):
+            raise TypeError("A question is answered with text.")
+        resolved = resolve_answer(reply, pending.options)
+        output = answer_for_model(resolved)
+        emit(UserAnswered(step=state.step, question=pending.question or "", answer=resolved))
+    else:
+        if not isinstance(reply, bool) or pending.request is None:
+            raise TypeError("An approval is answered with True (approve) or False (deny).")
+        ctx = ToolContext(sandbox=sandbox, output_dir=state.output_dir)
+        start = time.perf_counter()
+        output, is_error, file_path = resolve_approval(pending.request, reply, ctx)
+        state.code_seconds += time.perf_counter() - start
+        pending.log_entry["approval"]["decision"] = "approved" if reply else "denied"
+        emit(
+            ApprovalResolved(
+                step=state.step,
+                request=pending.request,
+                approved=reply,
+                automatic=False,
+                output=output,
+                file_path=file_path,
+            )
+        )
     for tool_result in state.pending_tool_results:
         if tool_result["tool_use_id"] == pending.tool_use_id:
             tool_result["content"] = output
-    pending.log_entry["output"] = output
-    emit(UserAnswered(step=state.step, question=pending.question, answer=resolved))
+            tool_result["is_error"] = is_error
+    pending.log_entry.update(output=output, is_error=is_error)
 
-    # All results of that step, the answer included, go back in one message.
+    # All results of that step, the response included, go back in one message.
     state.messages.append({"role": "user", "content": state.pending_tool_results})
     state.pending_tool_results = []
-    state.pending_question = None
+    state.pending = None
     write_log(state.log_path, state.log)
     return continue_run(state, sandbox, client, emit, None, pause_on_ask=True)
+
+
+def approve_now(
+    request: ApprovalRequest,
+    approve_fn: ApproveFn | None,
+    ctx: ToolContext,
+    step: int,
+    log_entry: dict[str, Any],
+    emit: EventHandler,
+) -> tuple[str, bool]:
+    """Decide an approval without pausing: ask `approve_fn`, or deny if there is no human."""
+    ctx.approvals_requested += 1
+    emit(ApprovalRequested(step=step, request=request))
+    automatic = approve_fn is None
+    approved = approve_fn(request) if approve_fn is not None else False
+    output, is_error, file_path = resolve_approval(request, approved, ctx, automatic)
+    log_entry["approval"]["decision"] = "approved" if approved else ("auto-denied" if automatic else "denied")
+    emit(
+        ApprovalResolved(
+            step=step, request=request, approved=approved, automatic=automatic, output=output, file_path=file_path
+        )
+    )
+    return output, is_error
 
 
 def continue_run(
@@ -361,8 +438,9 @@ def continue_run(
     emit: EventHandler,
     ask_user_fn: AskUserFn | None,
     pause_on_ask: bool,
+    approve_fn: ApproveFn | None = None,
 ) -> RunResult:
-    """Run steps until the run finishes or pauses for a question."""
+    """Run steps until the run finishes or pauses for the human."""
     segment_start = time.perf_counter()
     status: RunStatus = "running"
     final_answer: str | None = None
@@ -372,6 +450,7 @@ def continue_run(
         output_dir=state.output_dir,
         ask_user_fn=ask_user_fn,
         questions_asked=state.questions_asked,
+        approvals_requested=state.approvals_requested,
         plan=state.plan,
         namespace=state.namespace,
     )
@@ -454,44 +533,61 @@ def continue_run(
                 final_answer = extract_text(response.content) or None
                 break
 
-            # Run every requested tool. A question for the human is held back
-            # (its slot keeps the order) and the other tools still run first.
+            # Run every requested tool. A question or an approval for the human is
+            # held back (its slot keeps the order) and the other tools still run first.
             tool_results: list[dict[str, Any]] = []
-            pending: PendingQuestion | None = None
+            pending: PendingInteraction | None = None
             for block in response.content:
                 if block.type != "tool_use":
                     continue
+                log_entry: dict[str, Any] = {"name": block.name, "input": block.input}
+                held: PendingInteraction | None = None
+                start = time.perf_counter()
+                outcome: tuple[str, bool] | None
                 if block.name == ASK_USER_TOOL["name"] and pause_on_ask and ask_user_fn is None:
-                    rejected = check_ask_user(block.input, ctx)
-                    if rejected is None and pending is not None:
-                        rejected = ("Only one question at a time. Ask again after the answer.", True)
-                    if rejected is None:
-                        ctx.questions_asked += 1
-                        log_entry = {
-                            "name": block.name,
-                            "input": block.input,
-                            "output": None,
-                            "is_error": False,
-                            "duration_s": 0.0,
-                        }
+                    outcome = check_ask_user(block.input, ctx)
+                    if outcome is None:
+                        held = PendingInteraction(
+                            tool_use_id=block.id,
+                            kind="question",
+                            log_entry=log_entry,
+                            question=block.input["question"],
+                            options=block.input.get("options"),
+                        )
+                elif block.name == EXPORT_DATA_TOOL["name"]:
+                    prepared = prepare_export(block.input, ctx)
+                    if isinstance(prepared, ApprovalRequest):
+                        log_entry["approval"] = {"request": prepared.details, "decision": None}
+                        if pause_on_ask and approve_fn is None:
+                            held = PendingInteraction(
+                                tool_use_id=block.id, kind="approval", log_entry=log_entry, request=prepared
+                            )
+                            outcome = None
+                        else:
+                            outcome = approve_now(prepared, approve_fn, ctx, step, log_entry, emit)
+                    else:
+                        outcome = prepared
+                else:
+                    outcome = execute_tool(block.name, block.input, ctx)
+
+                if held is not None:
+                    if pending is None:
+                        if held.kind == "question":
+                            ctx.questions_asked += 1
+                        else:
+                            ctx.approvals_requested += 1
+                        log_entry.update(output=None, is_error=False, duration_s=0.0)
                         step_log["tool_calls"].append(log_entry)
                         tool_results.append(
                             {"type": "tool_result", "tool_use_id": block.id, "content": None, "is_error": False}
                         )
-                        pending = PendingQuestion(
-                            tool_use_id=block.id,
-                            question=block.input["question"],
-                            options=block.input.get("options"),
-                            log_entry=log_entry,
-                        )
+                        pending = held
                         continue
-                    output, is_error = rejected
-                    elapsed = 0.0
-                else:
-                    start = time.perf_counter()
-                    output, is_error = execute_tool(block.name, block.input, ctx)
-                    elapsed = time.perf_counter() - start
-                    state.code_seconds += elapsed
+                    outcome = ("Only one question or approval at a time. Try again after the user responds.", True)
+                assert outcome is not None
+                output, is_error = outcome
+                elapsed = time.perf_counter() - start
+                state.code_seconds += elapsed
                 # Let the model see slow operations.
                 output = f"{output}\n[executed in {elapsed:.1f}s]"
                 emit(
@@ -513,15 +609,8 @@ def continue_run(
                         "is_error": is_error,
                     }
                 )
-                step_log["tool_calls"].append(
-                    {
-                        "name": block.name,
-                        "input": block.input,
-                        "output": output,
-                        "is_error": is_error,
-                        "duration_s": round(elapsed, 2),
-                    }
-                )
+                log_entry.update(output=output, is_error=is_error, duration_s=round(elapsed, 2))
+                step_log["tool_calls"].append(log_entry)
                 if block.name == UPDATE_PLAN_TOOL["name"] and not is_error and ctx.plan:
                     plan = copy.deepcopy(ctx.plan)
                     step_log.setdefault("plan_updates", []).append(plan)
@@ -536,9 +625,12 @@ def continue_run(
 
             if pending is not None:
                 state.pending_tool_results = tool_results
-                state.pending_question = pending
+                state.pending = pending
                 status = "waiting_for_user"
-                emit(UserQuestion(step=step, question=pending.question, options=pending.options))
+                if pending.request is not None:
+                    emit(ApprovalRequested(step=step, request=pending.request))
+                else:
+                    emit(UserQuestion(step=step, question=pending.question or "", options=pending.options))
                 break
 
             state.messages.append({"role": "user", "content": tool_results})
@@ -546,10 +638,14 @@ def continue_run(
             write_log(state.log_path, state.log)
     finally:
         state.questions_asked = ctx.questions_asked
+        state.approvals_requested = ctx.approvals_requested
         state.plan = ctx.plan
         state.active_seconds += time.perf_counter() - segment_start
         if state.output_dir is not None:
             state.charts = [chart.as_posix() for chart in sorted(state.output_dir.glob("*.png"))]
+            state.exports = [
+                path.as_posix() for path in sorted(state.output_dir.iterdir()) if path.suffix in (".csv", ".xlsx")
+            ]
         # Not enforced for now: a final answer with open plan items is only flagged.
         open_items = [
             item["id"] for item in state.plan or [] if item["status"] in ("pending", "in_progress")
@@ -582,6 +678,7 @@ def continue_run(
             plan_incomplete=plan_incomplete,
             warnings=warnings,
             charts=state.charts,
+            exports=state.exports,
             verification=asdict(report) if report else None,
             draft_answer=state.draft_answer,
             revised=revised,
@@ -601,7 +698,7 @@ def continue_run(
             },
         )
         write_log(state.log_path, state.log)
-        waiting = status == "waiting_for_user" and state.pending_question is not None
+        pending_now = state.pending if status == "waiting_for_user" else None
         result = RunResult(
             status=status,
             final_answer=final_answer,
@@ -612,9 +709,12 @@ def continue_run(
             duration_s=round(state.active_seconds, 2),
             charts=state.charts,
             log_path=state.log_path.as_posix(),
-            question=state.pending_question.question if waiting else None,
-            options=state.pending_question.options if waiting else None,
-            state=state if waiting else None,
+            waiting_for=pending_now.kind if pending_now else None,
+            question=pending_now.question if pending_now else None,
+            options=pending_now.options if pending_now else None,
+            approval=pending_now.request if pending_now else None,
+            state=state if pending_now else None,
+            exports=list(state.exports),
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
             verification=report,

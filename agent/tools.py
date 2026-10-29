@@ -1,6 +1,7 @@
 """Tool definitions for Claude and the code that executes them."""
 
 import base64
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -8,15 +9,19 @@ from pathlib import Path
 from typing import Any
 
 from agent.config import (
+    MAX_APPROVALS,
     MAX_OUTPUT_CHARS,
     MAX_USER_QUESTIONS,
     OUTPUT_HEAD_CHARS,
     OUTPUT_TAIL_CHARS,
 )
+from agent.guard import check_code
 from agent.sandbox import Sandbox
 
 # Shows a question (with optional choices) to a human and returns the raw answer.
 AskUserFn = Callable[[str, list[str] | None], str]
+# Shows an approval request to a human and returns True if they approve.
+ApproveFn = Callable[["ApprovalRequest"], bool]
 
 
 @dataclass
@@ -27,11 +32,14 @@ class ToolContext:
     output_dir: Path | None = None
     ask_user_fn: AskUserFn | None = None
     questions_asked: int = 0
+    approvals_requested: int = 0
     # Artifacts of the latest tool call, for displaying them; reset on every call.
     last_images: list[str] = field(default_factory=list)
     last_chart_paths: list[str] = field(default_factory=list)
     # The agent's current analysis plan, replaced as a whole by update_plan.
     plan: list[dict[str, str]] | None = None
+    # Separate kernel namespace for run_code and get_schema (the verifier's).
+    namespace: str | None = None
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -67,6 +75,8 @@ RUN_CODE_TOOL: dict[str, Any] = {
         "the code. Matplotlib charts are captured automatically; you will be told "
         "how many charts were generated, but you cannot see them. "
         "Errors are returned with the exception type and traceback. "
+        "Code that writes files, deletes files, runs shell commands or uses the network "
+        "is blocked before it runs; use save_chart for charts and export_data for data files. "
         "Available libraries: pandas, numpy, matplotlib, scipy. Installing other "
         "packages is not allowed."
     ),
@@ -222,11 +232,41 @@ UPDATE_PLAN_TOOL: dict[str, Any] = {
     },
 }
 
+EXPORT_DATA_TOOL: dict[str, Any] = {
+    "name": "export_data",
+    "description": (
+        "Save a DataFrame from the kernel as a CSV or Excel file for the user to download. "
+        "Use it ONLY when the user explicitly asks to export, save or download data. "
+        "The user must approve every export first; if they deny it, do not retry. "
+        "Prepare the DataFrame with run_code first, then pass its variable name."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "variable": {
+                "type": "string",
+                "description": "Name of the DataFrame variable in the kernel, e.g. 'negative_rows'.",
+            },
+            "filename": {
+                "type": "string",
+                "description": "Short file name without extension, e.g. 'negative_quantity_rows'.",
+            },
+            "format": {"type": "string", "enum": ["csv", "xlsx"]},
+            "reason": {
+                "type": "string",
+                "description": "One sentence for the user: what the file contains and why it is exported.",
+            },
+        },
+        "required": ["variable", "filename", "format", "reason"],
+    },
+}
+
 TOOLS: list[dict[str, Any]] = [
     GET_SCHEMA_TOOL,
     UPDATE_PLAN_TOOL,
     RUN_CODE_TOOL,
     SAVE_CHART_TOOL,
+    EXPORT_DATA_TOOL,
     ASK_USER_TOOL,
 ]
 
@@ -318,12 +358,12 @@ def safe_filename(name: str) -> str:
     return cleaned[:MAX_FILENAME_CHARS] or "chart"
 
 
-def unique_path(folder: Path, stem: str) -> Path:
-    """Return folder/stem.png, adding _2, _3, ... instead of overwriting a file."""
-    path = folder / f"{stem}.png"
+def unique_path(folder: Path, stem: str, suffix: str = ".png") -> Path:
+    """Return folder/stem.suffix, adding _2, _3, ... instead of overwriting a file."""
+    path = folder / f"{stem}{suffix}"
     counter = 2
     while path.exists():
-        path = folder / f"{stem}_{counter}.png"
+        path = folder / f"{stem}_{counter}{suffix}"
         counter += 1
     return path
 
@@ -333,8 +373,11 @@ def run_code(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Missing required input: code (a non-empty string).", True
+    blocked = check_code(code)
+    if blocked:
+        return blocked, True
 
-    result = ctx.sandbox.execute(code)
+    result = ctx.sandbox.execute(code, namespace=ctx.namespace)
 
     parts: list[str] = []
     if result.stdout:
@@ -359,7 +402,7 @@ def get_schema(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]
         return f"Invalid variable name: {variable!r}. Use a plain Python name like 'df'.", True
 
     code = f"{SCHEMA_CODE}\nprint(_agent_schema({variable!r}))\ndel _agent_schema"
-    result = ctx.sandbox.execute(code)
+    result = ctx.sandbox.execute(code, namespace=ctx.namespace)
     if not result.success:
         return f"get_schema failed:\n{result.error}", True
 
@@ -375,6 +418,9 @@ def save_chart(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Missing required input: code (a non-empty string).", True
+    blocked = check_code(code)
+    if blocked:
+        return blocked, True
 
     title = tool_input.get("title")
     if isinstance(title, str) and title.strip():
@@ -529,6 +575,132 @@ def report_verification(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[s
     if problems:
         return "Report not accepted: " + " ".join(problems) + " Send the whole report again.", True
     return f"Report accepted: {len(tool_input['claims'])} claims.", False
+
+
+EXPORT_FORMATS = ("csv", "xlsx")
+EXCEL_MAX_ROWS = 1_048_575  # one row of the sheet is the header
+MAX_SHOWN_COLUMNS = 8
+SIZE_SAMPLE_ROWS = 1000
+APPROVAL_LIMIT_REACHED = "Approval limit reached for this run. Do not request more exports."
+EXPORT_DENIED = "User denied the export. Do not retry; continue without it and mention it in the answer."
+EXPORT_NO_APPROVER = (
+    "No user is available to approve the export, so it was denied automatically. "
+    "Do not retry; continue without it and mention it in the answer."
+)
+
+# Runs in the kernel: shape, columns and an estimated CSV size of a DataFrame.
+EXPORT_INFO_CODE = f'''
+def _agent_export_info(name):
+    import json
+    import pandas as pd
+
+    obj = globals().get(name)
+    if obj is None:
+        return json.dumps({{"error": f"variable '{{name}}' does not exist in the kernel."}})
+    if not isinstance(obj, pd.DataFrame):
+        return json.dumps({{"error": f"'{{name}}' is a {{type(obj).__name__}}, not a pandas DataFrame."}})
+    sample = obj.head({SIZE_SAMPLE_ROWS})
+    per_row = len(sample.to_csv(index=False).encode()) / max(len(sample), 1)
+    return json.dumps({{"rows": len(obj), "columns": [str(c) for c in obj.columns], "bytes": per_row * len(obj)}})
+'''
+
+
+@dataclass(frozen=True)
+class ApprovalRequest:
+    """An action the model wants to take that a human must approve first."""
+
+    tool: str
+    # One line, e.g. "Export `neg` (10,624 rows) to neg.xlsx".
+    action: str
+    # Everything the human should see before deciding, in display order.
+    details: dict[str, str]
+    variable: str
+    file_format: str
+    path: str
+
+
+def format_size(size: float) -> str:
+    if size < 1024:
+        return f"{size:.0f} B"
+    return f"{size / 1024 / 1024:.1f} MB" if size >= 1024 * 1024 else f"{size / 1024:.0f} KB"
+
+
+def prepare_export(tool_input: dict[str, Any], ctx: ToolContext) -> ApprovalRequest | tuple[str, bool]:
+    """Validate an export_data call and describe it for approval; nothing is written yet.
+
+    Returns the request, or (message for the model, is_error) if it cannot go ahead.
+    """
+    if ctx.output_dir is None:
+        return "export_data is not available: no output folder for this run.", True
+    variable = tool_input.get("variable")
+    if not isinstance(variable, str) or not variable.isidentifier():
+        return f"Invalid variable name: {variable!r}. Use a plain Python name of a DataFrame.", True
+    file_format = tool_input.get("format")
+    if file_format not in EXPORT_FORMATS:
+        return f"Invalid format {file_format!r}; use one of {', '.join(EXPORT_FORMATS)}.", True
+    reason = tool_input.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return "Missing required input: reason (one sentence for the user).", True
+    if ctx.approvals_requested >= MAX_APPROVALS:
+        return APPROVAL_LIMIT_REACHED, False
+
+    result = ctx.sandbox.execute(f"{EXPORT_INFO_CODE}\nprint(_agent_export_info({variable!r}))\ndel _agent_export_info")
+    if not result.success:
+        return f"export_data failed:\n{result.error}", True
+    info = json.loads(result.stdout.strip())
+    if "error" in info:
+        return f"Cannot export: {info['error']}", True
+    rows, columns = info["rows"], info["columns"]
+    if file_format == "xlsx" and rows > EXCEL_MAX_ROWS:
+        return f"Cannot export {rows:,} rows to xlsx (limit {EXCEL_MAX_ROWS:,}); use csv.", True
+
+    path = unique_path(ctx.output_dir, safe_filename(str(tool_input.get("filename", ""))), f".{file_format}")
+    shown = ", ".join(columns[:MAX_SHOWN_COLUMNS])
+    if len(columns) > MAX_SHOWN_COLUMNS:
+        shown += f", ... ({len(columns) - MAX_SHOWN_COLUMNS} more)"
+    return ApprovalRequest(
+        tool=EXPORT_DATA_TOOL["name"],
+        action=f"Export `{variable}` ({rows:,} rows) to {path.name}",
+        details={
+            "Variable": variable,
+            "Size": f"{rows:,} rows x {len(columns)} columns",
+            "Columns": shown,
+            "Format": file_format,
+            "File": path.as_posix(),
+            "Approx. size": format_size(info["bytes"]),
+            "Reason": reason.strip(),
+        },
+        variable=variable,
+        file_format=file_format,
+        path=path.as_posix(),
+    )
+
+
+def run_export(request: ApprovalRequest, ctx: ToolContext) -> tuple[str, bool, str | None]:
+    """Write the approved file; returns (message, is_error, file path)."""
+    path = Path(request.path)
+    if path.exists():
+        # Never overwrite: a file with this name appeared after the request.
+        # Number from the base name again, so "x_2" becomes "x_3", not "x_2_2".
+        path = unique_path(path.parent, re.sub(r"_\d+$", "", path.stem), path.suffix)
+    writer = "to_csv" if request.file_format == "csv" else "to_excel"
+    # Our own code, not the model's: it is not checked by the guard.
+    result = ctx.sandbox.execute(
+        f"globals()[{request.variable!r}].{writer}({path.as_posix()!r}, index=False)", timeout=120
+    )
+    if not result.success or not path.exists():
+        return f"Export failed:\n{result.error or 'no file was written.'}", True, None
+    size = format_size(path.stat().st_size)
+    return f"Exported to {path.as_posix()} ({size}). Tell the user the file name.", False, path.as_posix()
+
+
+def resolve_approval(
+    request: ApprovalRequest, approved: bool, ctx: ToolContext, automatic: bool = False
+) -> tuple[str, bool, str | None]:
+    """Carry out the human's decision: (message for the model, is_error, file path)."""
+    if not approved:
+        return (EXPORT_NO_APPROVER if automatic else EXPORT_DENIED), False, None
+    return run_export(request, ctx)
 
 
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]

@@ -22,6 +22,7 @@ from streamlit.runtime.uploaded_file_manager import UploadedFile
 from agent.events import (
     AnswerRevised,
     ApiCallFinished,
+    ApprovalResolved,
     AssistantText,
     Event,
     RunFinished,
@@ -50,6 +51,7 @@ TOOL_ICONS = {
     "update_plan": ":material/checklist:",
     "run_code": ":material/code:",
     "save_chart": ":material/bar_chart:",
+    "export_data": ":material/download:",
     "ask_user": ":material/help:",
     "report_verification": ":material/fact_check:",
 }
@@ -228,6 +230,12 @@ class StepRenderer:
                     self.box.image(path, caption=Path(path).name)
             case PlanUpdated(items=items) if self.plan_slot:
                 self.plan_slot.container(border=True).markdown(plan_markdown(items))
+            case ApprovalResolved(request=request, approved=approved, automatic=automatic):
+                # The request and the decision stay visible between the steps.
+                decision = "Approved" if approved else ("Denied automatically (no user)" if automatic else "Denied")
+                self.parent.container(border=True).markdown(
+                    escape_dollars(f":material/verified_user: **Approval** · {request.action}\n\n**Your decision:** {decision}")
+                )
             case UserAnswered(question=question, answer=answer):
                 # The question and the human's answer stay visible between the steps.
                 shown = answer or "_left to the agent_"
@@ -302,6 +310,23 @@ def ask_question(slot: DeltaGenerator, result: RunResult, key: str) -> str | Non
     return answer
 
 
+def ask_approval(slot: DeltaGenerator, result: RunResult, key: str) -> bool | None:
+    """Show what the agent wants to do; return True/False once the human decides."""
+    request = result.approval
+    if request is None:
+        return None
+    decision: bool | None = None
+    with slot.container(border=True):
+        st.warning(escape_dollars(f"The agent asks for approval: {request.action}"), icon=":material/verified_user:")
+        st.markdown(escape_dollars("\n".join(f"- **{name}:** {value}" for name, value in request.details.items())))
+        approve, deny = st.columns(2)
+        if approve.button("Approve", key=f"{key}_approve", type="primary", use_container_width=True):
+            decision = True
+        if deny.button("Deny", key=f"{key}_deny", use_container_width=True):
+            decision = False
+    return decision
+
+
 def show_result(result: RunResult) -> None:
     """Render the outcome of one run inside its chat message."""
     # st.error and st.warning render markdown too, so their text is escaped as well.
@@ -350,6 +375,17 @@ def show_result(result: RunResult) -> None:
 
     for chart in result.charts:
         st.image(chart, caption=Path(chart).name)
+
+    for export in result.exports:
+        path = Path(export)
+        if path.exists():
+            st.download_button(
+                f"Download {path.name}",
+                data=path.read_bytes(),
+                file_name=path.name,
+                key=f"download_{export}",
+                icon=":material/download:",
+            )
 
     st.caption(
         f"{result.steps} steps · tokens {result.input_tokens:,} in / {result.output_tokens:,} out "
@@ -478,15 +514,20 @@ for index, turn in enumerate(turns):
         elif result.status != "waiting_for_user":
             show_result(result)
         elif index == len(turns) - 1 and result.state is not None:
-            # The agent asked a question inside this answer: ask the human here.
+            # The agent asked a question or an approval inside this answer: ask the human here.
             slot = st.empty()
-            answer = ask_question(slot, result, key=f"turn{index}_q{result.state.questions_asked}")
-            if answer is not None:
+            key = f"turn{index}_{result.state.questions_asked}_{result.state.approvals_requested}"
+            reply: str | bool | None
+            if result.waiting_for == "approval":
+                reply = ask_approval(slot, result, key)
+            else:
+                reply = ask_question(slot, result, key)
+            if reply is not None:
                 slot.empty()
-                with st.spinner("The agent continues with your answer..."):
+                with st.spinner("The agent continues..."):
                     turn["result"] = resume_agent(
                         result.state,
-                        answer,
+                        reply,
                         get_sandbox(),
                         get_client(),
                         on_event=live_handler(
@@ -499,7 +540,7 @@ waiting = bool(turns) and turns[-1]["result"] is not None and turns[-1]["result"
 if uploaded is None:
     hint = "Upload a dataset to start"
 elif waiting:
-    hint = "Answer the agent's question above first"
+    hint = "Respond to the agent above first"
 else:
     hint = "Ask a question about the data"
 prompt = st.chat_input(hint, disabled=uploaded is None or waiting)

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agent.loop import RunResult
+    from agent.tools import ApprovalRequest
     from agent.verifier import VerificationReport
 
 
@@ -97,6 +98,28 @@ class UserAnswered:
 
 
 @dataclass(frozen=True)
+class ApprovalRequested:
+    """The agent wants to do a risky action (e.g. export a file) and needs the human's approval."""
+
+    step: int
+    request: ApprovalRequest
+
+
+@dataclass(frozen=True)
+class ApprovalResolved:
+    """The human (or, with no human, the loop automatically) decided on an approval."""
+
+    step: int
+    request: ApprovalRequest
+    approved: bool
+    # True if no human was available and the request was denied automatically.
+    automatic: bool
+    output: str
+    # The written file, if the action was approved and succeeded.
+    file_path: str | None
+
+
+@dataclass(frozen=True)
 class VerificationStarted:
     """The agent gave a final answer; the verifier starts checking it."""
 
@@ -155,6 +178,8 @@ Event = (
     | PlanUpdated
     | UserQuestion
     | UserAnswered
+    | ApprovalRequested
+    | ApprovalResolved
     | VerificationStarted
     | VerifierEvent
     | VerificationFinished

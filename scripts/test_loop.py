@@ -9,6 +9,7 @@ from typing import Any
 
 import anthropic
 import httpx2
+import pandas as pd
 
 # Make the project root importable when running this file as a script.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -24,6 +25,8 @@ import agent.loop  # noqa: E402
 from agent.events import (  # noqa: E402
     AnswerRevised,
     ApiCallFinished,
+    ApprovalRequested,
+    ApprovalResolved,
     AssistantText,
     Event,
     PlanUpdated,
@@ -39,7 +42,7 @@ from agent.events import (  # noqa: E402
     VerifierEvent,
 )
 from agent.loop import RunResult, build_messages, resume_agent, run_agent  # noqa: E402
-from agent.tools import QUESTION_LIMIT_REACHED  # noqa: E402
+from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
 passed = 0
@@ -196,6 +199,11 @@ def run(
     log = read_log(result)
     cleanup(result)
     return result, log
+
+
+def export_use(file_format: str = "csv", block_id: str = "toolu_export") -> Any:
+    tool_input = {"variable": "neg", "filename": "negative", "format": file_format, "reason": "Rows to review."}
+    return SimpleNamespace(type="tool_use", id=block_id, name="export_data", input=tool_input)
 
 
 def report_use(claims: list[dict[str, str]], block_id: str = "toolu_report") -> Any:
@@ -463,6 +471,117 @@ def main() -> int:
                and log is not None and log["plan_incomplete"] and "2, 3" in log["warnings"][0],
                f"status={result.status}, plan_incomplete={result.plan_incomplete}, "
                f"warning={log['warnings'] if log else '-'}")
+        cleanup(result)
+
+        # Approvals: export_data needs the human's decision before it writes a file
+        sb.execute("neg = pd.DataFrame({'Quantity': [-1, -2, -3], 'Price': [1.0, 2.0, 3.0]})")
+
+        # ab) pause on approval -> approve -> the file is written and reported
+        events = []
+        client = FakeClient([
+            make_response([text("Exporting."), export_use()], "tool_use"),
+            make_response([text("Done, the file is ready.")], "end_turn"),
+        ])
+        paused = run_agent("Export", sb, client, pause_on_ask=True, on_event=events.append)  # type: ignore[arg-type]
+        request = paused.approval
+        waiting_ok = (paused.status == "waiting_for_user" and paused.waiting_for == "approval"
+                      and request is not None and request.details["Size"] == "3 rows x 2 columns"
+                      and not Path(request.path).exists())
+        final = resume_agent(paused.state, True, sb, client, on_event=events.append)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        log = read_log(final)
+        entry = log["steps"][0]["tool_calls"][0] if log else {}
+        resolved = [e for e in events if isinstance(e, ApprovalResolved)]
+        exported = Path(final.exports[0]) if final.exports else None
+        report("ab) approval: approve -> file written",
+               waiting_ok and final.status == "completed" and exported is not None and exported.exists()
+               and pd.read_csv(exported).shape == (3, 2) and results[0]["content"].startswith("Exported to")
+               and any(isinstance(e, ApprovalRequested) for e in events)
+               and len(resolved) == 1 and resolved[0].approved and resolved[0].file_path == exported.as_posix()
+               and entry.get("approval", {}).get("decision") == "approved",
+               f"waiting_for={paused.waiting_for}, action={request.action if request else None!r}, "
+               f"model got {results[0]['content'].splitlines()[0]!r}, log decision={entry.get('approval', {}).get('decision')}")
+        cleanup(final)
+
+        # ac) pause on approval -> deny -> no file, the model is told
+        client = FakeClient([
+            make_response([export_use()], "tool_use"),
+            make_response([text("The export was denied.")], "end_turn"),
+        ])
+        paused = run_agent("Export", sb, client, pause_on_ask=True)  # type: ignore[arg-type]
+        planned = Path(paused.approval.path) if paused.approval else None
+        final = resume_agent(paused.state, False, sb, client)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        log = read_log(final)
+        entry = log["steps"][0]["tool_calls"][0] if log else {}
+        report("ac) approval: deny -> no file",
+               final.status == "completed" and planned is not None and not planned.exists() and not final.exports
+               and results[0]["content"] == EXPORT_DENIED and entry["approval"]["decision"] == "denied",
+               f"model got {results[0]['content']!r}, files={final.exports}")
+        cleanup(final)
+
+        # ad) No human (no approve_fn, no pause): denied automatically, nothing written
+        events = []
+        client = FakeClient([
+            make_response([export_use()], "tool_use"),
+            make_response([text("I could not export.")], "end_turn"),
+        ])
+        result = run_agent("Export", sb, client, on_event=events.append)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        resolved = [e for e in events if isinstance(e, ApprovalResolved)]
+        log = read_log(result)
+        report("ad) no human -> auto-denied",
+               result.status == "completed" and not result.exports
+               and results[0]["content"].startswith(EXPORT_NO_APPROVER)
+               and len(resolved) == 1 and resolved[0].automatic and not resolved[0].approved
+               and log is not None and log["steps"][0]["tool_calls"][0]["approval"]["decision"] == "auto-denied",
+               f"model got {results[0]['content'].splitlines()[0]!r}")
+        cleanup(result)
+
+        # ae) A blocking approve_fn (console) approves without pausing
+        client = FakeClient([
+            make_response([export_use()], "tool_use"),
+            make_response([text("Done.")], "end_turn"),
+        ])
+        asked: list[str] = []
+        result = run_agent("Export", sb, client,  # type: ignore[arg-type]
+                           approve_fn=lambda request: asked.append(request.action) or True)
+        report("ae) approve_fn approves in place",
+               result.status == "completed" and len(asked) == 1 and len(result.exports) == 1
+               and Path(result.exports[0]).exists(),
+               f"asked={asked}, exports={[Path(e).name for e in result.exports]}")
+        cleanup(result)
+
+        # af) ask_user and an approval in different steps of one run
+        client = FakeClient([
+            make_response([ask("CSV or Excel?", ["csv", "xlsx"])], "tool_use"),
+            make_response([export_use(file_format="xlsx", block_id="toolu_export2")], "tool_use"),
+            make_response([text("Exported as Excel.")], "end_turn"),
+        ])
+        first = run_agent("Export", sb, client, pause_on_ask=True)  # type: ignore[arg-type]
+        second = resume_agent(first.state, "2", sb, client)  # type: ignore[arg-type]
+        final = resume_agent(second.state, True, sb, client)  # type: ignore[arg-type]
+        log = read_log(final)
+        calls = [c["name"] for s in log["steps"] for c in s["tool_calls"]] if log else []
+        report("af) question then approval in one run",
+               first.waiting_for == "question" and second.waiting_for == "approval"
+               and final.status == "completed" and len(final.exports) == 1 and final.exports[0].endswith(".xlsx")
+               and last_tool_results(client, 2)[0]["content"] == "User answered: xlsx"
+               and calls == ["ask_user", "export_data"] and final.log_path == first.log_path,
+               f"pauses: {first.waiting_for} -> {second.waiting_for} -> {final.status}, tool calls={calls}")
+        cleanup(final)
+
+        # ag) Code blocked by the guard never runs; the model gets an error with a hint
+        client = FakeClient([
+            make_response([tool_use("df.to_csv('out.csv')\nprint('written')")], "tool_use"),
+            make_response([text("Ok.")], "end_turn"),
+        ])
+        result = run_agent("Export", sb, client)  # type: ignore[arg-type]
+        results = last_tool_results(client, 2)
+        report("ag) guard blocks run_code",
+               results[0]["is_error"] and "export_data" in results[0]["content"]
+               and "written" not in results[0]["content"] and not Path("out.csv").exists(),
+               results[0]["content"].splitlines()[1])
         cleanup(result)
 
         # g) A crashing event handler does not break the run

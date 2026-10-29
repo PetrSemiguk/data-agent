@@ -5,6 +5,8 @@ import json
 from agent.events import (
     AnswerRevised,
     ApiCallFinished,
+    ApprovalRequested,
+    ApprovalResolved,
     AssistantText,
     Event,
     PlanUpdated,
@@ -81,6 +83,14 @@ class ConsolePrinter:
                 print(f"[Waiting for the user] {question}")
             case UserAnswered(answer=answer):
                 print(f"[User answered] {answer or '(left to the agent)'}")
+            case ApprovalRequested(request=request):
+                self._end_line()
+                print(f"[Approval needed] {request.action}")
+                for name, value in request.details.items():
+                    print(f"  {name}: {value}")
+            case ApprovalResolved(approved=approved, automatic=automatic, output=output):
+                decision = "Approved" if approved else ("Denied automatically (no user)" if automatic else "Denied")
+                print(f"[Approval] {decision}: {output.splitlines()[0]}")
             case VerificationStarted():
                 self._end_line()
                 self.speaker = "Verifier"

@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 # Make the project root importable when running this file as a script.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -19,10 +21,15 @@ from agent.config import (  # noqa: E402
 )
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.tools import (  # noqa: E402
+    EXPORT_DENIED,
     QUESTION_LIMIT_REACHED,
     USER_UNAVAILABLE,
+    ApprovalRequest,
     ToolContext,
     execute_tool,
+    prepare_export,
+    resolve_approval,
+    run_export,
     truncate_output,
 )
 
@@ -42,6 +49,11 @@ def report(name: str, ok: bool, details: str) -> None:
         failed += 1
     print(f"[{'PASS' if ok else 'FAIL'}] {name}")
     print(f"       {details}")
+
+
+def neg_count(sb: Sandbox) -> int:
+    """Number of rows of `neg` in the kernel, to compare with what was exported."""
+    return int(sb.execute("len(neg)").result or 0)
 
 
 def main() -> int:
@@ -183,6 +195,71 @@ def main() -> int:
             text, is_error = execute_tool(
                 "save_chart", {"code": "df['Nope'].plot()", "filename": "broken"}, ToolContext(sb, run_dir))
             report("n) failing code -> error", is_error and "KeyError" in text, text.splitlines()[0])
+
+        # export_data: prepared for approval, then written into the run folder
+        sb.execute("neg = df[df['Profit'] < 0][['Order ID', 'Sales', 'Profit']]\nnot_a_frame = 5")
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            ctx = ToolContext(sb, run_dir)
+
+            def export(**overrides: Any) -> Any:
+                tool_input = {"variable": "neg", "filename": "losses", "format": "csv",
+                              "reason": "Orders with a loss.", **overrides}
+                return prepare_export(tool_input, ctx)
+
+            # x) Wrong inputs are errors and nothing is written
+            bad = {
+                "missing variable": export(variable="nope"),
+                "not a DataFrame": export(variable="not_a_frame"),
+                "invalid name": export(variable="neg; import os"),
+                "bad format": export(format="parquet"),
+                "no reason": export(reason=" "),
+            }
+            ok = all(isinstance(r, tuple) and r[1] for r in bad.values()) and not any(run_dir.iterdir())
+            report("x) export_data validation", ok,
+                   "; ".join(f"{k}: {r[0].splitlines()[0] if isinstance(r, tuple) else 'NOT REJECTED'}"
+                             for k, r in bad.items()))
+
+            # y) The request describes the export; the file name is made safe
+            request = export(filename="../../evil name!")
+            ok = (isinstance(request, ApprovalRequest) and Path(request.path).parent == run_dir
+                  and Path(request.path).name == "evil_name.csv"
+                  and request.details["Size"].startswith(f"{neg_count(sb):,} rows x 3 columns")
+                  and request.details["Reason"] == "Orders with a loss.")
+            report("y) request details + safe name", ok,
+                   f"{request.action if isinstance(request, ApprovalRequest) else request}; "
+                   f"details={request.details if isinstance(request, ApprovalRequest) else '-'}")
+
+            # z) csv and xlsx are written and read back with the same shape
+            shapes = {}
+            for file_format in ("csv", "xlsx"):
+                request = export(format=file_format)
+                assert isinstance(request, ApprovalRequest)
+                text, is_error, path = run_export(request, ctx)
+                read = pd.read_csv if file_format == "csv" else pd.read_excel
+                shapes[file_format] = read(path).shape if path else None
+            expected = (neg_count(sb), 3)
+            report("z) csv and xlsx written", shapes == {"csv": expected, "xlsx": expected},
+                   f"read back: {shapes}, expected {expected}")
+
+            # aa) No overwrite: a taken name gets a suffix, also if it appears after the request
+            first = run_dir / "losses.csv"
+            before = first.read_bytes()
+            request = export()
+            assert isinstance(request, ApprovalRequest)
+            (run_dir / "losses_2.csv").write_text("someone else's file")
+            _, _, path = run_export(request, ctx)
+            report("aa) export never overwrites",
+                   Path(request.path).name == "losses_2.csv" and path is not None and Path(path).name == "losses_3.csv"
+                   and first.read_bytes() == before
+                   and (run_dir / "losses_2.csv").read_text() == "someone else's file",
+                   f"planned {Path(request.path).name}, written {Path(path).name if path else None}")
+
+            # bb) Denied: nothing is written, the model is told not to retry
+            files_before = sorted(run_dir.iterdir())
+            text, is_error, path = resolve_approval(request, False, ctx)
+            report("bb) denied -> no file", text == EXPORT_DENIED and path is None
+                   and sorted(run_dir.iterdir()) == files_before, text)
 
         # i) Fast enough on 1M rows
         sb.load_dataframe(DATA_DIR / "online_retail_II.csv")
