@@ -191,6 +191,7 @@ class AgentState:
     memory_note_ids: list[int] = field(default_factory=list)
     pending_notes: list[dict[str, Any]] = field(default_factory=list)
     remembered: list[str] = field(default_factory=list)
+    not_remembered: list[str] = field(default_factory=list)
     memory_not_saved: str | None = None
 
 
@@ -232,9 +233,11 @@ class RunResult:
     # The agent could not finish its revision: final_answer is the unrevised draft.
     revision_failed: bool = False
     verification_warning: str | None = None
-    # Memory: notes shown to the model, notes saved by this run, or why none were saved.
+    # Memory: notes shown to the model, notes saved by this run, notes refused
+    # one by one (with the reason), or why none were saved at all.
     memory_loaded: int = 0
     remembered: list[str] = field(default_factory=list)
+    not_remembered: list[str] = field(default_factory=list)
     memory_not_saved: str | None = None
 
 
@@ -764,6 +767,7 @@ def continue_run(
                 **(state.log.get("memory") or {}),
                 "remember_calls": state.pending_notes,
                 "saved": state.remembered,
+                "not_remembered": state.not_remembered,
                 "not_saved_reason": state.memory_not_saved,
             }
         # Totals include the verifier's run; its own share is listed separately.
@@ -819,6 +823,7 @@ def continue_run(
             actions=list(state.actions),
             memory_loaded=len(state.memory_note_ids),
             remembered=list(state.remembered),
+            not_remembered=list(state.not_remembered),
             memory_not_saved=state.memory_not_saved,
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
@@ -860,7 +865,14 @@ def save_memory(state: AgentState, status: RunStatus, revision_failed: bool) -> 
         state.memory_not_saved = f"{len(state.pending_notes)} memory notes were not saved: {reason}."
         return
     memory = state.memory
+    to_save = []
     for note in state.pending_notes:
+        refused = unchecked_fact_reason(state, note)
+        if refused:
+            state.not_remembered.append(f"{note['text']} ({refused})")
+        else:
+            to_save.append(note)
+    for note in to_save:
         # Facts about the data come from the agent; definitions and preferences from the user.
         source = "agent" if note["kind"] == "data_fact" else "user"
         fields = (memory.fingerprint, note["kind"], note["text"], note["evidence"], source, state.run_id)
@@ -874,16 +886,41 @@ def save_memory(state: AgentState, status: RunStatus, revision_failed: bool) -> 
             saved = False
         if saved:
             state.remembered.append(note["text"])
-    if len(state.remembered) < len(state.pending_notes):
-        state.memory_not_saved = (
-            f"{len(state.pending_notes) - len(state.remembered)} memory notes were not saved: "
-            "memory is full or the note to replace was deleted."
-        )
+        else:
+            state.not_remembered.append(f"{note['text']} (memory is full or the note to replace was deleted)")
+
+
+def unchecked_fact_reason(state: AgentState, note: dict[str, Any]) -> str | None:
+    """Why a note may not be saved, or None if it may.
+
+    Definitions and preferences are the user's decisions and are not checked.
+    A data_fact needs a "supported" verdict: better to forget than to remember
+    something wrong.
+    """
+    if note["kind"] != "data_fact":
+        return None
+    check = note.get("check")
+    if check is None:
+        if not state.verify:
+            return "not checked: answer verification is off"
+        if state.verification is None or state.verification.status == "incomplete":
+            return "not checked: the verification did not complete"
+        return "not checked: noted after the answer was verified"
+    if check["status"] == "supported":
+        return None
+    detail = check.get("correction") or check["evidence"]
+    return f"{check['status']}: {detail}"
 
 
 def needs_verification(state: AgentState, answer: str) -> bool:
-    """Check a final answer once per run, and only if it contains numbers."""
-    return state.verify and not state.verified and bool(HAS_DIGIT.search(answer))
+    """Check a final answer once per run, if it contains numbers or the agent
+    wants to remember facts about the data."""
+    return state.verify and not state.verified and (bool(HAS_DIGIT.search(answer)) or bool(facts_to_check(state)))
+
+
+def facts_to_check(state: AgentState) -> list[dict[str, Any]]:
+    """The run's data_fact notes; only these go to the fact-checker."""
+    return [note for note in state.pending_notes if note["kind"] == "data_fact"]
 
 
 def verify_final_answer(
@@ -905,6 +942,7 @@ def verify_final_answer(
     emit(VerificationStarted(step=state.step))
     report: VerificationReport | None = None
     try:
+        facts = facts_to_check(state)
         report = verify_answer(
             state.question,
             answer,
@@ -912,7 +950,10 @@ def verify_final_answer(
             client,
             state.model,
             on_event=lambda event: emit(VerifierEvent(event=event)),
+            notes=facts,
         )
+        for note, check in zip(facts, report.note_checks):
+            note["check"] = {"status": check.status, "evidence": check.evidence, "correction": check.correction}
     except Exception as exc:
         logger.exception("Verification crashed")
         state.verification_warning = f"Verification failed ({type(exc).__name__}: {exc}); the answer was not checked."

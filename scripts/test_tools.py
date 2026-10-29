@@ -130,14 +130,15 @@ def main() -> int:
         "memory full": remember_call(note_ids=set(range(MEMORY_MAX_NOTES - 1)), pending=1, **fact),
         "memory off": remember_call(note_ids=None, **fact),
     }
-    report("cc) remember validation", all(r[1] for r in bad_notes.values()),
+    report("cc) remember validation",
+           all(r[1] for r in bad_notes.values()) and "split into separate notes" in bad_notes["too long"][0],
            "; ".join(f"{k}: {r[0][:60]}" for k, r in bad_notes.items()))
 
     text, is_error, ctx = remember_call(**fact)
     definition = remember_call(note_ids={4}, kind="definition", text="Revenue means net revenue.", replaces=4)
     full_but_replaces = remember_call(note_ids=set(range(MEMORY_MAX_NOTES)), replaces=3, **fact)
     report("dd) remember keeps valid notes until the end of the run",
-           not is_error and ctx.pending_notes == [{**fact, "replaces": None}]
+           not is_error and ctx.pending_notes == [{**fact, "replaces": None, "check": None}]
            and not definition[1] and definition[2].pending_notes[0]["replaces"] == 4
            and not full_but_replaces[1],
            f"{text} | replaces: {definition[0]} | full memory, replaces=3: {full_but_replaces[0][:40]}")

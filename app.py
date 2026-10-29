@@ -367,6 +367,15 @@ def show_result(result: RunResult) -> None:
                         "Correction": claim.correction or "",
                     }
                     for claim in report.claims
+                ]
+                + [
+                    {
+                        "Status": f"{CLAIM_ICONS.get(check.status, '')} {check.status}",
+                        "Claim": f"[memory note] {check.claim}",
+                        "Evidence": check.evidence,
+                        "Correction": check.correction or "",
+                    }
+                    for check in report.note_checks
                 ],
                 hide_index=True,
                 width="stretch",
@@ -381,6 +390,8 @@ def show_result(result: RunResult) -> None:
 
     if result.remembered:
         st.caption(escape_dollars(":material/bookmark_add: Remembered: " + " · ".join(result.remembered)))
+    if result.not_remembered:
+        st.caption(escape_dollars(":material/bookmark_remove: Not remembered: " + " · ".join(result.not_remembered)))
     if result.memory_not_saved:
         st.caption(escape_dollars(f":material/warning: {result.memory_not_saved}"))
 

@@ -247,14 +247,16 @@ REMEMBER_TOOL: dict[str, Any] = {
         "date range, data quality) and definitions or preferences the user stated "
         "explicitly (e.g. 'revenue means net revenue'). Do not remember answers to "
         "specific questions. Do not duplicate a note that is already in memory; refine "
-        "it with `replaces`. A data_fact needs evidence: numbers your code printed. "
-        "Notes are saved only if this run finishes successfully."
+        "it with `replaces`. One fact per note, at most 160 characters; split longer "
+        "notes into separate calls. A data_fact needs evidence: numbers your code "
+        "printed. A data_fact is saved only if the fact-checker confirms it, and notes "
+        "are saved only if this run finishes successfully."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": list(NOTE_KINDS)},
-            "text": {"type": "string", "description": "One short sentence."},
+            "text": {"type": "string", "description": "One fact in one short sentence (max 160 characters)."},
             "evidence": {
                 "type": "string",
                 "description": "Required for data_fact: what your code printed, with numbers.",
@@ -751,15 +753,20 @@ def remember(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     if not isinstance(text, str) or not text.strip():
         return "Missing required input: text (one short sentence).", True
     if len(text) > MEMORY_NOTE_MAX_CHARS:
-        return f"The note is too long ({len(text)} chars); keep it under {MEMORY_NOTE_MAX_CHARS}.", True
+        return (
+            f"The note is too long ({len(text)} chars, limit {MEMORY_NOTE_MAX_CHARS}): "
+            "split into separate notes, one fact each.",
+            True,
+        )
     has_evidence = isinstance(evidence, str) and bool(evidence.strip())
     if kind == "data_fact" and not has_evidence:
         return "A data_fact needs evidence: the numbers your code printed that show it.", True
     if replaces is not None and replaces not in ctx.memory_note_ids:
         known = ", ".join(f"#{i}" for i in sorted(ctx.memory_note_ids)) or "none"
         return f"There is no memory note #{replaces} for this dataset (notes: {known}).", True
-    # A second note for the same target replaces the first one of this run.
-    ctx.pending_notes = [n for n in ctx.pending_notes if replaces is None or n["replaces"] != replaces]
+    # A second note for the same target replaces the first one of this run. The list
+    # is changed in place: the run's state holds the same list.
+    ctx.pending_notes[:] = [n for n in ctx.pending_notes if replaces is None or n["replaces"] != replaces]
     new_notes = sum(n["replaces"] is None for n in ctx.pending_notes)
     if replaces is None and len(ctx.memory_note_ids) + new_notes >= MEMORY_MAX_NOTES:
         return (
@@ -773,6 +780,8 @@ def remember(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
             "text": text.strip(),
             "evidence": evidence.strip() if has_evidence else None,
             "replaces": replaces,
+            # For a data_fact: the fact-checker's verdict, filled in by the loop.
+            "check": None,
         }
     )
     target = f" (replaces #{replaces})" if replaces is not None else ""

@@ -213,8 +213,8 @@ def export_use(file_format: str = "csv", block_id: str = "toolu_export") -> Any:
 NOTE = {"kind": "data_fact", "text": "34,335 rows are full duplicates.", "evidence": "duplicated().sum() = 34335"}
 
 
-def remember_use(block_id: str = "toolu_remember") -> Any:
-    return SimpleNamespace(type="tool_use", id=block_id, name="remember", input=dict(NOTE))
+def remember_use(block_id: str = "toolu_remember", **note: str) -> Any:
+    return SimpleNamespace(type="tool_use", id=block_id, name="remember", input=note or dict(NOTE))
 
 
 def report_use(claims: list[dict[str, str]], block_id: str = "toolu_report") -> Any:
@@ -633,14 +633,17 @@ def main() -> int:
         store = MemoryStore(memory_dir / "memory.db")
         memory = DatasetMemory(store, "fp_loop")
 
-        # aj) A successful run saves its note; the next run gets it in its first message
+        # aj) A data_fact the verifier supports is saved; the next run gets it in its first message
         client = FakeClient([
             make_response([remember_use()], "tool_use"),
             make_response([text("Done.")], "end_turn"),
+            make_response([report_use([{"claim": NOTE["text"], "status": "supported",
+                                        "evidence": "duplicated().sum() = 34335"}])], "tool_use"),
         ])
-        first = run_agent("Revenue?", sb, client, memory=memory)  # type: ignore[arg-type]
+        first = run_agent("Revenue?", sb, client, verify=True, memory=memory)  # type: ignore[arg-type]
         saved = store.list_notes("fp_loop")
         offered = client.tools[0]
+        verifier_request = client.requests[2][0]["content"]
         client = FakeClient([make_response([text("Done.")], "end_turn")])
         second = run_agent("Next?", sb, client, memory=memory,  # type: ignore[arg-type]
                            history=[HistoryTurn("Revenue?", "Done.")])
@@ -650,6 +653,7 @@ def main() -> int:
                first.remembered == [NOTE["text"]] and len(saved) == 1 and saved[0].source == "agent"
                and saved[0].evidence == NOTE["evidence"] and saved[0].run_id == Path(first.log_path or "").stem
                and "remember" in offered and second.memory_loaded == 1
+               and f"<note>{NOTE['text']}</note>" in verifier_request
                and isinstance(first_message, list) and first_message[0]["text"].startswith("[Memory for this dataset")
                and f"#{saved[0].id} data_fact" in first_message[0]["text"]
                and first_message[1]["text"] == "Revenue?"
@@ -666,6 +670,51 @@ def main() -> int:
                client.requests[0][0]["content"] == "Revenue?" and "remember" not in client.tools[0]
                and result.memory_loaded == 0,
                f"first message={client.requests[0][0]['content']!r}, tools={client.tools[0]}")
+        cleanup(result)
+
+        # ao) A data_fact the verifier contradicts is not saved; the answer itself is not revised
+        client = FakeClient([
+            make_response([remember_use()], "tool_use"),
+            make_response([text("Revenue is 10.")], "end_turn"),
+            make_response([report_use([CLAIM_OK, {"claim": NOTE["text"], "status": "contradicted",
+                                                  "evidence": "duplicated().sum() = 30000",
+                                                  "correction": "30,000 rows are full duplicates."}])], "tool_use"),
+        ])
+        before = len(store.list_notes("fp_loop"))
+        result = run_agent("Q", sb, client, verify=True, memory=memory)  # type: ignore[arg-type]
+        report("ao) contradicted fact -> not remembered",
+               result.status == "completed" and not result.revised and client.calls == 3
+               and len(store.list_notes("fp_loop")) == before and not result.remembered
+               and result.not_remembered == [f"{NOTE['text']} (contradicted: 30,000 rows are full duplicates.)"]
+               and result.verification is not None and result.verification.status == "ok"
+               and result.verification.note_checks[0].status == "contradicted",
+               f"not remembered: {result.not_remembered}; answer verification: "
+               f"{result.verification.status if result.verification else None}")
+        cleanup(result)
+
+        # ap) A user's definition is saved without a check (no numbers, so no verifier call)
+        client = FakeClient([
+            make_response([remember_use(kind="definition", text="Revenue means net revenue.")], "tool_use"),
+            make_response([text("I will use net revenue.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client, verify=True, memory=memory)  # type: ignore[arg-type]
+        saved = [n for n in store.list_notes("fp_loop") if n.text == "Revenue means net revenue."]
+        report("ap) user definition saved without check",
+               client.calls == 2 and result.verification is None and len(saved) == 1 and saved[0].source == "user",
+               f"API calls={client.calls}, saved={[(n.kind, n.source, n.text) for n in saved]}")
+        cleanup(result)
+
+        # aq) With verification off, a data_fact is not saved (a definition still is)
+        client = FakeClient([
+            make_response([remember_use(), remember_use(kind="preference", text="Answer in bullets.", block_id="t2")],
+                          "tool_use"),
+            make_response([text("Revenue is 10.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client, verify=False, memory=memory)  # type: ignore[arg-type]
+        report("aq) verification off -> data_fact not saved",
+               result.remembered == ["Answer in bullets."]
+               and result.not_remembered == [f"{NOTE['text']} (not checked: answer verification is off)"],
+               f"remembered={result.remembered}, not remembered={result.not_remembered}")
         cleanup(result)
 
         # al) An API error drops the run's notes

@@ -96,6 +96,8 @@ def main() -> int:
         print(f"Exported file: {path}")
     for note in result.remembered:
         print(f"Remembered: {note}")
+    for note in result.not_remembered:
+        print(f"Not remembered: {note}")
     if result.memory_not_saved:
         print(f"Memory: {result.memory_not_saved}")
     print(f"Log: {result.log_path}")
