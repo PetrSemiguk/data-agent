@@ -1,0 +1,33 @@
+services:
+  app:
+    build: .
+    image: data-agent
+    # The API key is read from .env when the container starts; it is not in the image.
+    env_file: .env
+    ports:
+      # Reachable only from this computer
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./data:/app/data:ro
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+      - logs:/app/logs
+      - memory:/app/memory
+    # Everything else is read-only; /tmp lives in memory and is lost on restart.
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    # Measured: about 60 MiB idle, 430 MiB peak with Online Retail II (1M rows) in
+    # the kernel; 2 GB leaves room for an uploaded file and pandas copies.
+    mem_limit: 2g
+    # A runaway loop can take at most two cores of the host.
+    cpus: 2
+    # Measured: under 40 with a running kernel; 256 still stops a fork bomb.
+    pids_limit: 256
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  outputs:
+  logs:
+  memory:

@@ -1,0 +1,23 @@
+# Secrets: the key is passed at run time (env_file in docker-compose.yml)
+.env
+.env.*
+
+# Local environment and tooling
+.venv/
+.git/
+.gitignore
+.claude/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.vscode/
+
+# Data and agent artifacts: mounted at run time, never baked into the image
+data/
+uploads/
+outputs/
+logs/
+memory/
+evals/results/
+*.db
+*.sqlite

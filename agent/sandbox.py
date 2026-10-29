@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -21,6 +23,21 @@ ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 # The kernel's working folder: relative paths in model code start here, and
 # the guard checks them against this folder too.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# The kernel gets only the environment variables Python, Jupyter and matplotlib
+# need to run; everything else (the API key above all) stays in the app process.
+KERNEL_ENV_NAMES = {
+    # Both systems
+    "PATH", "HOME", "LANG", "TZ", "TMPDIR", "TEMP", "TMP",
+    "JUPYTER_RUNTIME_DIR", "JUPYTER_DATA_DIR", "JUPYTER_CONFIG_DIR",
+    "IPYTHONDIR", "MPLCONFIGDIR", "MPLBACKEND", "PYTHONIOENCODING", "PYTHONUTF8",
+    # Windows: sockets and the temp folder do not work without these
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+}
+KERNEL_ENV_PREFIXES = ("LC_",)
+# Never passed, even if a name above would match.
+SECRET_NAME_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
 
 # How long to wait for the kernel to become idle after an interrupt.
 INTERRUPT_GRACE_SECONDS = 5.0
@@ -51,6 +68,20 @@ def _sandbox_run_in(_name, _code):
 '''
 
 
+def kernel_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for the kernel: allowed names only, no secrets."""
+    environ = os.environ if environ is None else environ
+    env = {}
+    for name, value in environ.items():
+        upper = name.upper()
+        if upper not in KERNEL_ENV_NAMES and not upper.startswith(KERNEL_ENV_PREFIXES):
+            continue
+        if any(part in upper for part in SECRET_NAME_PARTS):
+            continue
+        env[name] = value
+    return env
+
+
 @dataclass
 class ExecutionResult:
     """Everything the kernel produced while running one piece of code."""
@@ -77,7 +108,8 @@ class Sandbox:
         # replaces its "python" command with sys.executable, i.e. the venv Python.
         # Encrypt kernel traffic with CurveZMQ; fail loudly if that is impossible.
         self._km = KernelManager(kernel_name="python3", transport_encryption="required")
-        self._km.start_kernel(cwd=str(PROJECT_ROOT))
+        # The cleaned env is kept in the launch arguments, so restarts use it too.
+        self._km.start_kernel(cwd=str(PROJECT_ROOT), env=kernel_env())
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=60)

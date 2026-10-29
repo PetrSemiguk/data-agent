@@ -1,5 +1,6 @@
 """Manual checks for agent.sandbox using the Superstore dataset."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -40,7 +41,20 @@ def timeout_path(error: str | None) -> str:
 
 
 def main() -> int:
+    # Fake secrets in the app process; the kernel must not inherit them
+    os.environ["ANTHROPIC_API_KEY"] = "fake-key-for-test"
+    os.environ["SOME_SERVICE_TOKEN"] = "fake-token-for-test"
+
     with Sandbox() as sb:
+        # n) Secrets are not passed to the kernel, also after a restart
+        code = 'import os\n[os.environ.get(n) for n in ("ANTHROPIC_API_KEY", "SOME_SERVICE_TOKEN")]'
+        before = sb.execute(code).result
+        sb.restart()
+        after = sb.execute(code).result
+        report("n) kernel env has no secrets",
+               before == after == "[None, None]" and os.environ.get("ANTHROPIC_API_KEY") is not None,
+               f"in the kernel: before restart={before}, after restart={after}; in the app process: set")
+
         # 0) Common libraries are imported at startup (before load_dataframe)
         r = sb.execute("pd.__name__, np.__name__, plt.__name__")
         report("0) pd, np, plt preimported",

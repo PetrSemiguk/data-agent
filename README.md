@@ -15,3 +15,17 @@ the agent's methods generalize to data it was not tuned on.
 Final test datasets are stricter: the eval runs on them only once, after all changes.
 
 Run `python scripts/download_data.py` to download them into the data/ folder.
+
+## Run with Docker
+
+Needs `.env` with `ANTHROPIC_API_KEY` (see `.env.example`) and the datasets in `data/`.
+
+```
+docker compose build
+docker compose up -d                 # web app on http://localhost:8501
+docker compose run --rm app python scripts/run_agent.py --file "data/Titanic-Dataset.csv" --question "How many passengers survived?"
+docker compose down
+```
+
+The app runs as a non-root user on a read-only file system; `data/` is mounted
+read-only, and the analysis kernel gets no API key or other secrets.
