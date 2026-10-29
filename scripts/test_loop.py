@@ -213,6 +213,10 @@ def export_use(file_format: str = "csv", block_id: str = "toolu_export") -> Any:
 NOTE = {"kind": "data_fact", "text": "34,335 rows are full duplicates.", "evidence": "duplicated().sum() = 34335"}
 
 
+# The verifier's own evidence differs from the agent's, so the test sees which one is saved.
+VERIFIER_EVIDENCE = "Recomputed: df.duplicated().sum() = 34,335 of 1,067,371 rows."
+
+
 def remember_use(block_id: str = "toolu_remember", **note: str) -> Any:
     return SimpleNamespace(type="tool_use", id=block_id, name="remember", input=note or dict(NOTE))
 
@@ -638,7 +642,7 @@ def main() -> int:
             make_response([remember_use()], "tool_use"),
             make_response([text("Done.")], "end_turn"),
             make_response([report_use([{"claim": NOTE["text"], "status": "supported",
-                                        "evidence": "duplicated().sum() = 34335"}])], "tool_use"),
+                                        "evidence": VERIFIER_EVIDENCE}])], "tool_use"),
         ])
         first = run_agent("Revenue?", sb, client, verify=True, memory=memory)  # type: ignore[arg-type]
         saved = store.list_notes("fp_loop")
@@ -649,9 +653,9 @@ def main() -> int:
                            history=[HistoryTurn("Revenue?", "Done.")])
         first_message = client.requests[0][0]["content"]
         log = read_log(first)
-        report("aj) note saved, then loaded into the first message",
+        report("aj) supported note saved with the verifier's evidence, then loaded",
                first.remembered == [NOTE["text"]] and len(saved) == 1 and saved[0].source == "agent"
-               and saved[0].evidence == NOTE["evidence"] and saved[0].run_id == Path(first.log_path or "").stem
+               and saved[0].evidence == VERIFIER_EVIDENCE and saved[0].run_id == Path(first.log_path or "").stem
                and "remember" in offered and second.memory_loaded == 1
                and f"<note>{NOTE['text']}</note>" in verifier_request
                and isinstance(first_message, list) and first_message[0]["text"].startswith("[Memory for this dataset")

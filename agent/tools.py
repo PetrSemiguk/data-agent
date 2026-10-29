@@ -250,7 +250,8 @@ REMEMBER_TOOL: dict[str, Any] = {
         "it with `replaces`. One fact per note, at most 160 characters; split longer "
         "notes into separate calls. A data_fact needs evidence: numbers your code "
         "printed. A data_fact is saved only if the fact-checker confirms it, and notes "
-        "are saved only if this run finishes successfully."
+        "are saved only if this run finishes successfully. When the user asks you to "
+        "remember something, call this tool."
     ),
     "input_schema": {
         "type": "object",

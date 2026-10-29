@@ -875,7 +875,9 @@ def save_memory(state: AgentState, status: RunStatus, revision_failed: bool) -> 
     for note in to_save:
         # Facts about the data come from the agent; definitions and preferences from the user.
         source = "agent" if note["kind"] == "data_fact" else "user"
-        fields = (memory.fingerprint, note["kind"], note["text"], note["evidence"], source, state.run_id)
+        # A checked fact keeps the verifier's evidence: numbers it recomputed itself.
+        evidence = note["check"]["evidence"] if note.get("check") else note["evidence"]
+        fields = (memory.fingerprint, note["kind"], note["text"], evidence, source, state.run_id)
         try:
             if note["replaces"] is not None:
                 saved = memory.store.replace_note(note["replaces"], *fields)
