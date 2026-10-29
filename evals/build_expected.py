@@ -18,7 +18,8 @@ from reference import DATA_DIR, REFERENCES  # noqa: E402
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
 SPLITS = {"dev", "holdout", "final"}
 CATEGORIES = {"lookup", "aggregation", "time_series", "group_comparison", "data_quality_trap", "multi_step"}
-CHECK_TYPES = {"number", "ranking", "mention", "not_claim"}
+CHECK_TYPES = {"number", "label", "ranking", "mention", "not_claim"}
+ORDERS = {"descending", "ascending"}
 
 
 def validate(question: dict[str, Any]) -> list[str]:
@@ -40,12 +41,14 @@ def validate(question: dict[str, Any]) -> list[str]:
         kind = check.get("type")
         if kind not in CHECK_TYPES or not check.get("description"):
             problems.append(f"{qid}: invalid check {check}")
-        if kind in ("number", "ranking") and not check.get("key"):
+        if kind in ("number", "label", "ranking") and not check.get("key"):
             problems.append(f"{qid}: {kind} check without 'key'")
         if kind == "number" and "abs_tol" not in check and "rel_tol" not in check:
             problems.append(f"{qid}: number check '{check.get('key')}' without abs_tol or rel_tol")
         if kind == "ranking" and not isinstance(check.get("top_k"), int):
             problems.append(f"{qid}: ranking check '{check.get('key')}' without top_k")
+        if kind == "ranking" and check.get("order") not in ORDERS:
+            problems.append(f"{qid}: ranking check '{check.get('key')}' without order ({' or '.join(sorted(ORDERS))})")
     return problems
 
 
@@ -60,6 +63,8 @@ def fill(question: dict[str, Any]) -> dict[str, Any]:
             raise KeyError(f"{question['id']}: reference {question['reference']} returned no '{key}'")
         if check["type"] == "number":
             check["value"] = round(float(values[key]), 6)
+        elif check["type"] == "label":
+            check["value"] = str(values[key])
         else:
             check["items"] = list(values[key])[: check["top_k"]]
     return values

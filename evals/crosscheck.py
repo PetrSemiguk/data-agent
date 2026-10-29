@@ -105,8 +105,8 @@ def d08() -> dict[str, Any]:
         if r["Region"] == region:
             losses[r["Sub-Category"]] += float(r["Profit"])
     worst = min(losses, key=losses.get)
-    return {"weakest_region": [region], "weakest_region_margin": margin[region],
-            "biggest_loss_subcategory": [worst], "biggest_loss": losses[worst]}
+    return {"weakest_region": region, "weakest_region_margin": margin[region],
+            "biggest_loss_subcategory": worst, "biggest_loss": losses[worst]}
 
 
 # -------------------------------------------------------- dev: Online Retail II
@@ -191,7 +191,7 @@ def h04() -> dict[str, Any]:
         temps[r["date"][:4]].append(float(r["meantemp"]))
     full = {year: statistics.fmean(v) for year, v in temps.items() if len(v) >= 365}
     best = max(full, key=full.get)
-    return {"warmest_year": [best], "warmest_year_mean": full[best]}
+    return {"warmest_year": best, "warmest_year_mean": full[best]}
 
 
 def h05() -> dict[str, Any]:
@@ -254,6 +254,8 @@ CROSSCHECKS: dict[str, Callable[[], dict[str, Any]]] = {
 
 
 def same(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, str):
+        return expected == str(actual)
     if isinstance(expected, list):
         return [str(x) for x in expected] == [str(x) for x in actual][: len(expected)]
     # Only rounding noise is allowed: expected values are stored with 6 decimals.
@@ -275,11 +277,11 @@ def main() -> int:
             key = check.get("key")
             if key is None:
                 continue
-            expected = check["value"] if check["type"] == "number" else check["items"]
+            expected = check["items"] if check["type"] == "ranking" else check["value"]
             ok = same(expected, second[key])
             mismatches += not ok
             left = "(hidden)" if hide else str(expected)
-            right = "(hidden)" if hide else str(second[key] if check["type"] == "number" else second[key][: len(expected)])
+            right = "(hidden)" if hide else str(second[key][: len(expected)] if check["type"] == "ranking" else second[key])
             print(f"{question['id']:4} {key:26} {left[:34]:>34} {right[:34]:>34}  {'OK' if ok else 'MISMATCH'}")
     print(f"\n{'All values match.' if not mismatches else f'{mismatches} MISMATCHES'}")
     return 0 if not mismatches else 1

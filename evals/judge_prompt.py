@@ -21,13 +21,26 @@ amounts as plain numbers: $836K -> 836000, 8.98 million -> 8980000, 34.3K -> 343
 - If the answer gives a range for it, put the ends in low and high and leave value null.
 - The value must refer to exactly what the description names: the same group, period \
 and definition. A number about another year, group or measure does not count; if the \
-answer does not state the named value, value is null. When the answer gives several \
-values for it, take the one the answer presents as its main result.
+answer does not state the named value, value is null.
 
-ranking checks: list the items in the order the answer ranks them for what the \
-description names, highest first, with their full names as written. If the answer \
-implies an order through values or words ("ahead of", "third place"), use that order. \
-If the answer gives no such ranking, items is null.
+label checks: give in label the single name (a region, month, group, year...) the answer \
+gives as its answer to what the description names, as written. If it names none, label \
+is null.
+
+ranking checks: list the items in the order the check asks for (it says "highest first" \
+or "lowest first"), with their full names as written, ranked as the answer ranks them \
+for what the description names. If the answer implies an order through values or words \
+("ahead of", "third place"), use that order. If the answer gives no such ranking, items \
+is null.
+
+Different values in one answer (number, label and ranking checks): if the answer states \
+different values for the same thing, extract the one it presents as its result or \
+conclusion (a headline, a final sentence, "corrected", "final"). A value it calls an \
+example, an earlier estimate or a comparison that it then sets aside is not its result. \
+A clearly presented result wins even if another sentence contradicts it: extract the \
+result and leave conflicting false. Set conflicting to true only when the answer presents \
+two different values as its result, or none of them as its result; then still report the \
+most prominent value.
 
 mention checks: verdict "yes" if the answer clearly says what the description requires, \
 in any wording; otherwise "no".
@@ -55,10 +68,16 @@ SUBMIT_GRADES_TOOL = {
                         "low": {"type": ["number", "null"], "description": "number checks: lower end of a stated range."},
                         "high": {"type": ["number", "null"], "description": "number checks: upper end of a stated range."},
                         "precision": {"type": ["number", "null"], "description": "number checks: rounding step as written."},
+                        "label": {"type": ["string", "null"], "description": "label checks: the named answer."},
                         "items": {
                             "type": ["array", "null"],
                             "items": {"type": "string"},
-                            "description": "ranking checks: items in the answer's order, highest first.",
+                            "description": "ranking checks: items in the order the check asks for.",
+                        },
+                        "conflicting": {
+                            "type": "boolean",
+                            "description": "number, label and ranking checks: true if the answer states "
+                                           "different values for this and its result is unclear.",
                         },
                         "verdict": {"type": ["string", "null"], "enum": ["yes", "no", None],
                                     "description": "mention and not_claim checks."},
@@ -74,9 +93,19 @@ SUBMIT_GRADES_TOOL = {
 }
 
 
+ORDER_WORDS = {"descending": "highest first", "ascending": "lowest first"}
+
+
+def check_tag(check: dict) -> str:
+    """'ranking, highest first' for rankings, else the check type."""
+    if check["type"] == "ranking":
+        return f"ranking, {ORDER_WORDS[check['order']]}"
+    return check["type"]
+
+
 def judge_request(question: str, answer: str, checks: list[dict]) -> str:
     """The user message for the judge: question, answer and check descriptions only."""
-    listed = "\n".join(f"{i}. [{check['type']}] {check['description']}" for i, check in enumerate(checks, start=1))
+    listed = "\n".join(f"{i}. [{check_tag(check)}] {check['description']}" for i, check in enumerate(checks, start=1))
     return (
         f"Question:\n{question}\n\n"
         f"Answer:\n<answer>\n{answer}\n</answer>\n\n"

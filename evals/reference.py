@@ -1,7 +1,7 @@
 """Reference answers: one function per eval question, computed with pandas.
 
 Each function returns {check key: expected value}. A number check gets a float,
-a ranking check gets the list of items in order. build_expected.py writes the
+a label check a string, and a ranking check the list of items in order. build_expected.py writes the
 values into questions.json.
 """
 
@@ -115,9 +115,9 @@ def d08_superstore_weakest_region() -> dict[str, Any]:
     region = margin.index[0]
     losses = data[data["Region"] == region].groupby("Sub-Category")["Profit"].sum().sort_values()
     return {
-        "weakest_region": [region],
+        "weakest_region": region,
         "weakest_region_margin": float(margin.iloc[0]),
-        "biggest_loss_subcategory": [losses.index[0]],
+        "biggest_loss_subcategory": losses.index[0],
         "biggest_loss": float(losses.iloc[0]),
     }
 
@@ -188,7 +188,7 @@ def h04_climate_warmest_year() -> dict[str, Any]:
     days = data.groupby(data["date"].dt.year).size()
     complete = days[days >= 365].index
     means = data[data["date"].dt.year.isin(complete)].groupby(data["date"].dt.year)["meantemp"].mean()
-    return {"warmest_year": [str(int(means.idxmax()))], "warmest_year_mean": float(means.max())}
+    return {"warmest_year": str(int(means.idxmax())), "warmest_year_mean": float(means.max())}
 
 
 def h05_climate_average_pressure() -> dict[str, Any]:

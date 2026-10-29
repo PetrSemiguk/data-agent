@@ -140,7 +140,8 @@
           "Furniture",
           "Office Supplies"
         ],
-        "top_k": 3
+        "top_k": 3,
+        "order": "descending"
       },
       {
         "type": "number",
@@ -171,7 +172,8 @@
           "September",
           "December"
         ],
-        "top_k": 3
+        "top_k": 3,
+        "order": "descending"
       },
       {
         "type": "number",
@@ -206,7 +208,8 @@
           "Office Supplies",
           "Furniture"
         ],
-        "top_k": 3
+        "top_k": 3,
+        "order": "descending"
       },
       {
         "type": "number",
@@ -227,13 +230,10 @@
     "traps": [],
     "checks": [
       {
-        "type": "ranking",
+        "type": "label",
         "key": "weakest_region",
         "description": "Region with the lowest profit margin",
-        "items": [
-          "Central"
-        ],
-        "top_k": 1
+        "value": "Central"
       },
       {
         "type": "number",
@@ -243,13 +243,10 @@
         "abs_tol": 0.1
       },
       {
-        "type": "ranking",
+        "type": "label",
         "key": "biggest_loss_subcategory",
         "description": "Sub-category with the largest total loss in that region",
-        "items": [
-          "Furnishings"
-        ],
-        "top_k": 1
+        "value": "Furnishings"
       },
       {
         "type": "number",
@@ -411,7 +408,8 @@
           "Human Resources",
           "Research & Development"
         ],
-        "top_k": 3
+        "top_k": 3,
+        "order": "descending"
       },
       {
         "type": "number",
@@ -467,13 +465,10 @@
     ],
     "checks": [
       {
-        "type": "ranking",
+        "type": "label",
         "key": "warmest_year",
         "description": "Warmest year by mean temperature, among complete years",
-        "items": [
-          "2016"
-        ],
-        "top_k": 1
+        "value": "2016"
       },
       {
         "type": "number",
@@ -669,7 +664,8 @@
           "98109",
           "98112"
         ],
-        "top_k": 3
+        "top_k": 3,
+        "order": "descending"
       },
       {
         "type": "number",

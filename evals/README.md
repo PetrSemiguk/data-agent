@@ -31,8 +31,13 @@ Check types:
 
 - `number`: `{type, key, description, value, abs_tol | rel_tol}` - a value the answer
   must state; `key` links it to the reference function's output.
-- `ranking`: `{type, key, description, items, top_k}` - the first `top_k` items in order.
+- `label`: `{type, key, description, value}` - one named value the answer gives as its
+  answer (a region, a month, a year); compared ignoring case, abbreviations allowed.
+- `ranking`: `{type, key, description, items, top_k, order}` - the first `top_k` items in
+  order; `order` is `descending` (highest first) or `ascending` (lowest first).
 - `mention`: `{type, description}` - something the answer must say (graded by a judge).
+  If an answer states different values for one quantity and its result is unclear, the
+  number, label or ranking check fails as "answer contradicts itself".
 - `not_claim`: `{type, description}` - something the answer must not say (graded by a judge).
 
 Ambiguous questions either fix the interpretation in the question text (e.g. "net

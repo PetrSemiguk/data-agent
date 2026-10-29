@@ -73,7 +73,8 @@ def main() -> int:
         report(name, ok == expected, f"{grade} -> passed={ok} ({why})")
 
     # Rankings
-    ranking = {"type": "ranking", "description": "Top months", "items": ["November", "September", "December"], "top_k": 3}
+    ranking = {"type": "ranking", "description": "Top months", "items": ["November", "September", "December"],
+               "top_k": 3, "order": "descending"}
     for name, items, expected in [
         ("n) same order", ["November", "September", "December", "October"], True),
         ("o) abbreviations", ["Nov", "Sep", "Dec"], True),
@@ -83,9 +84,37 @@ def main() -> int:
     ]:
         ok, why = g.compare_ranking(ranking, {"items": items})
         report(name, ok == expected, f"{items} -> passed={ok} ({why})")
-    top1 = {"type": "ranking", "description": "Weakest region", "items": ["Central"], "top_k": 1}
+    top1 = {"type": "ranking", "description": "Weakest region", "items": ["Central"], "top_k": 1, "order": "ascending"}
     report("s) top_k=1 uses the first item", g.compare_ranking(top1, {"items": ["Central", "South"]})[0]
            and not g.compare_ranking(top1, {"items": ["South", "Central"]})[0], "Central first passes, South first fails")
+
+    # label: one named value, case and abbreviations as in rankings
+    label = {"type": "label", "description": "Region with the lowest profit margin", "value": "Central"}
+    report("s2) label compare",
+           g.compare(label, {"label": "central"})[0] and g.compare(label, {"label": "CENTRAL region"})[0]
+           and not g.compare(label, {"label": "West"})[0] and not g.compare(label, {"label": None})[0]
+           and g.compare({**label, "value": "November"}, {"label": "Nov"})[0],
+           "'central', 'CENTRAL region', 'Nov' pass; 'West' and null fail")
+
+    # conflicting: number, label and ranking fail; mention and not_claim are not affected
+    conflict_number = g.compare(number(74.2038), {"value": 74.2, "precision": 0.1, "conflicting": True})
+    report("s3) conflicting answers fail",
+           not conflict_number[0] and "contradicts itself" in conflict_number[1]
+           and not g.compare(label, {"label": "Central", "conflicting": True})[0]
+           and not g.compare(ranking, {"items": ["November", "September", "December"], "conflicting": True})[0]
+           and g.compare({"type": "mention", "description": "x"}, {"verdict": "yes", "conflicting": True})[0],
+           conflict_number[1])
+
+    # The judge sees the ranking direction and the label type in the request
+    from judge_prompt import judge_request  # noqa: E402
+    request = judge_request("Q?", "A.", [
+        {"type": "ranking", "order": "descending", "description": "Top months"},
+        {"type": "ranking", "order": "ascending", "description": "Bottom months"},
+        {"type": "label", "description": "Weakest region"},
+    ])
+    report("s4) order and label in the judge request",
+           "1. [ranking, highest first] Top months" in request and "2. [ranking, lowest first] Bottom months" in request
+           and "3. [label] Weakest region" in request, request.split("Checks:\n")[1].replace("\n", " | "))
 
     # mention / not_claim semantics
     mention, not_claim = {"type": "mention", "description": "x"}, {"type": "not_claim", "description": "y"}
@@ -110,6 +139,27 @@ def main() -> int:
            and len(judge.requests) == 2 and result["strict_pass"] and result["partial_score"] == 1.0
            and result["judge_cost_usd"] == 2 * (1000 * 2 + 200 * 10) / 1e6,
            f"requests={len(judge.requests)}, strict={result['strict_pass']}, cost={result['judge_cost_usd']}")
+
+    # An incomplete report (a mention without verdict) is sent back once and then complete
+    class IncompleteFirst(FakeJudge):
+        def create(self, **kwargs: Any) -> Any:
+            response = super().create(**kwargs)
+            if len(self.requests) == 1:
+                call = response.content[0]
+                call.input = {"grades": [dict(call.input["grades"][0]), {"index": 2, "verdict": None, "explanation": "e"}]}
+                call.id = "toolu_1"
+            return response
+
+    mention_q = {"question": "Q?", "checks": [number(74.2038), {"type": "mention", "description": "Says x"}]}
+    judge = IncompleteFirst([{"index": 1, "value": 74.2, "precision": 0.1, "explanation": "e"},
+                             {"index": 2, "verdict": "yes", "explanation": "e"}])
+    result = g.grade_answer(judge, "claude-sonnet-5-5", mention_q, "An answer.")
+    retry = next(m["content"][0] for m in judge.requests[1]["messages"]
+                 if m["role"] == "user" and isinstance(m["content"], list))
+    report("u2) incomplete judge report is asked again",
+           len(judge.requests) == 2 and retry["is_error"] and "check 2 (mention) needs verdict" in retry["content"]
+           and result["strict_pass"],
+           retry["content"])
 
     # No answer: every check fails without calling the judge
     judge = FakeJudge([])

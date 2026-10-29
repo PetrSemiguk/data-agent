@@ -90,6 +90,25 @@ CASES = [
     ("d11", "duplicate count wrong",
      "After removing 34,353 exact duplicates, net revenue in 2010 was £9,079,584.",
      [True, False]),
+    # Answers that state different values for one quantity
+    ("d11", "contradiction, result is clear",
+     "My first estimate was 9.2 million, before removing duplicates. After removing the 34,335 exact duplicate "
+     "rows, the final net revenue for 2010 is 9.08 million.",
+     [True, True]),
+    ("d02", "contradiction, result unclear",
+     "Women survived at a rate of 74.2%, and a second calculation gives 68.1% for women. Men survived at 18.9%. "
+     "There were 314 women and 577 men.",
+     [False, True, True]),
+    ("d09", "headline plus a contradicting side remark",
+     "**5,881 distinct customers made at least one purchase.** I left out rows without a Customer ID and "
+     "cancellation invoices. All 5,942 customer IDs in the data appear on at least one non-cancelled row.",
+     [True, True]),
+    # d08 checks: weakest region (label), its margin, sub-category with the largest loss (label), that loss
+    ("d08", "label with a table listed highest first",
+     "Central has the lowest profit margin, and Furnishings loses the most money there.\n\n"
+     "| Region | Margin |\n|---|---|\n| West | 14.9% |\n| East | 13.5% |\n| South | 11.9% |\n| Central | 7.9% |\n\n"
+     "In Central, Furnishings lost $3,906, followed by Tables ($3,560).",
+     [True, True, True, True]),
 ]
 
 

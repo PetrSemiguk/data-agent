@@ -109,11 +109,24 @@ def compare_ranking(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool,
     return ok, "same order" if ok else "different order or items"
 
 
+def compare_label(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool, str]:
+    """Pass if the named answer is the expected one (case and abbreviations as in rankings)."""
+    stated = grade.get("label")
+    if not stated:
+        return False, "the answer names no value for this"
+    ok = same_item(str(check["value"]), str(stated))
+    return ok, "same value" if ok else "a different value"
+
+
 def compare(check: dict[str, Any], grade: dict[str, Any] | None) -> tuple[bool, str]:
     if grade is None:
         return False, "the judge did not report this check"
+    if check["type"] in ("number", "label", "ranking") and grade.get("conflicting"):
+        return False, "answer contradicts itself: it states different values and its result is unclear"
     if check["type"] == "number":
         return compare_number(check, grade)
+    if check["type"] == "label":
+        return compare_label(check, grade)
     if check["type"] == "ranking":
         return compare_ranking(check, grade)
     verdict = grade.get("verdict")
@@ -131,21 +144,38 @@ def extracted_of(check: dict[str, Any], grade: dict[str, Any] | None) -> Any:
             [grade.get("low"), grade.get("high")] if grade.get("low") is not None else None)
     if check["type"] == "ranking":
         return grade.get("items")
+    if check["type"] == "label":
+        return grade.get("label")
     return grade.get("verdict")
 
 
 def expected_of(check: dict[str, Any]) -> Any:
-    return check.get("value") if check["type"] == "number" else check.get("items")
+    return check.get("items") if check["type"] == "ranking" else check.get("value")
 
 
 # ------------------------------------------------------------------ the judge
 
+def missing_fields(checks: list[dict[str, Any]], grades: dict[int, dict]) -> list[str]:
+    """Checks the judge left out or reported without the field its type needs."""
+    problems = []
+    for index, check in enumerate(checks, start=1):
+        grade = grades.get(index)
+        if grade is None:
+            problems.append(f"check {index} is missing")
+        elif check["type"] in ("mention", "not_claim") and grade.get("verdict") not in ("yes", "no"):
+            problems.append(f"check {index} ({check['type']}) needs verdict \"yes\" or \"no\"")
+    return problems
+
+
 def ask_judge(client: Any, model: str, question: str, answer: str, checks: list[dict[str, Any]]) -> tuple[dict[int, dict], float | None, dict[str, int]]:
-    """One judge call (plus one retry if it answers without the tool)."""
+    """One judge call; it is asked again (at most twice) if it answers without the tool
+    or leaves a check out. A report that stays incomplete is returned as it is, and
+    its incomplete checks fail."""
     messages: list[dict[str, Any]] = [{"role": "user", "content": judge_request(question, answer, checks)}]
     cost: float | None = 0.0
     tokens = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
-    for _ in range(2):
+    grades: dict[int, dict] | None = None
+    for _ in range(3):
         response = client.messages.create(
             model=model, max_tokens=4096, system=JUDGE_PROMPT, tools=[SUBMIT_GRADES_TOOL], messages=messages
         )
@@ -154,14 +184,24 @@ def ask_judge(client: Any, model: str, question: str, answer: str, checks: list[
             tokens[name] += count
         cost = add_costs(cost, request_cost(model, *counts))
         call = next((b for b in response.content if b.type == "tool_use" and b.name == "submit_grades"), None)
-        if call is not None:
-            grades = {int(g["index"]): g for g in call.input.get("grades", []) if "index" in g}
+        messages.append({"role": "assistant", "content": response.content})
+        if call is None:
+            messages.append({"role": "user", "content": "Report the grades by calling submit_grades."})
+            continue
+        grades = {int(g["index"]): g for g in call.input.get("grades", []) if "index" in g}
+        problems = missing_fields(checks, grades)
+        if not problems:
             return grades, cost, tokens
-        messages += [
-            {"role": "assistant", "content": response.content},
-            {"role": "user", "content": "Report the grades by calling submit_grades."},
-        ]
-    raise RuntimeError("The judge did not call submit_grades.")
+        messages.append({"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": getattr(call, "id", "submit_grades"),
+            "is_error": True,
+            "content": "Incomplete report: " + "; ".join(problems)
+                       + ". Call submit_grades again with every check.",
+        }]})
+    if grades is None:
+        raise RuntimeError("The judge did not call submit_grades.")
+    return grades, cost, tokens
 
 
 def grade_answer(client: Any, model: str, question: dict[str, Any], answer: str | None) -> dict[str, Any]:
@@ -186,6 +226,7 @@ def grade_answer(client: Any, model: str, question: dict[str, Any], answer: str 
             "extracted": extracted_of(check, grade),
             "quote": grade.get("quote") if grade else None,
             "expected": expected_of(check),
+            "conflicting": bool(grade.get("conflicting")) if grade else False,
             "explanation": f"{reason}; judge: {grade.get('explanation', '')}" if grade else reason,
         })
     passed_count = sum(r["passed"] for r in results)
@@ -213,7 +254,7 @@ def print_grade(question: dict[str, Any], repeat: int, grade: dict[str, Any]) ->
           f"judge {format_cost(grade['judge_cost_usd'])}")
     for c in grade["checks"]:
         extracted = c["extracted"]
-        if question["split"] == "final" and c["type"] in ("number", "ranking"):
+        if question["split"] == "final" and c["type"] in ("number", "label", "ranking"):
             extracted = "(hidden)" if extracted is not None else None
         quote = (c["quote"] or "")[:70]
         print(f"  {'PASS' if c['passed'] else 'FAIL'} {c['index']}. {c['type']:9} expected={shown_expected(question, c['expected']):28} "
