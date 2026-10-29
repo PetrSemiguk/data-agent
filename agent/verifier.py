@@ -52,7 +52,8 @@ class VerificationReport:
     # input_tokens is the uncached part; the whole prompt also includes these.
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
-    cost_usd: float = 0.0
+    # None when config.py has no prices for the model.
+    cost_usd: float | None = 0.0
 
 
 def verification_request(question: str, answer: str, notes: list[dict[str, Any]] | None = None) -> str:

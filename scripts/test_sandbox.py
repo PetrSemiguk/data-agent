@@ -93,6 +93,41 @@ def main() -> int:
                and after.success and after.result == "42",
                f"handled via: {path}; then y = {after.result}")
 
+        # Separate namespace (used by the verifier): its code must not touch the kernel's variables
+        ns = "test_ns"
+        sb.execute('data = "agent"')
+        sb.execute("data = 1", namespace=ns)
+        after = sb.execute("data")
+        report("h) namespace keeps agent variable", after.result == "'agent'",
+               f"agent's data after namespace code 'data = 1': {after.result}")
+
+        r = sb.execute('df.drop(columns=["Sales"], inplace=True)\ndf.shape', namespace=ns)
+        after = sb.execute('df.shape, "Sales" in df.columns')
+        report("i) namespace inplace drop leaves df",
+               r.success and r.result == "(9994, 20)" and after.result == "((9994, 21), True)",
+               f"namespace df.shape = {r.result}; agent's (df.shape, has Sales) = {after.result}")
+
+        r = sb.execute("x", namespace=ns)
+        report("j) agent variables hidden", not r.success and "NameError" in (r.error or ""),
+               f"agent's x in namespace: {first_line(r.error)}")
+
+        r = sb.execute("y = 2\ny * 21", namespace=ns)
+        report("k) last expression shown", r.success and r.result == "42", f"result: {r.result}")
+
+        # m) The kernel works in the project root, also after a restart: relative paths in
+        #    model code and the guard's checks mean the same folder
+        before = sb.execute("import os\nos.getcwd()").result
+        sb.restart()
+        after = sb.execute("import os\nos.getcwd()").result
+        sb.load_dataframe(DATASET)
+        root = repr(str(PROJECT_ROOT))
+        report("m) kernel cwd is the project root", before == root and after == root, f"before={before}, after restart={after}")
+
+        sb.drop_namespace(ns)
+        r = sb.execute("y", namespace=ns)
+        report("l) dropped namespace is gone", not r.success and "NameError" in (r.error or ""),
+               f"namespace variable y after drop: {first_line(r.error) or r.result}")
+
     print(f"\nTotal: {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1
 

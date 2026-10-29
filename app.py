@@ -42,6 +42,7 @@ from agent.loop import HistoryTurn, RunResult, action_record, create_client, res
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint
 from agent.sandbox import Sandbox
 from agent.skills_loader import Skill, load_skills
+from agent.usage import format_cost
 from agent.tools import plan_summary
 from agent.verifier import VerificationReport
 
@@ -395,7 +396,7 @@ def show_result(result: RunResult) -> None:
             st.caption(
                 f"Check: {report.steps} steps · tokens {report.input_tokens:,} in · "
                 f"{report.cache_write_tokens:,} cache write · {report.cache_read_tokens:,} cache read · "
-                f"{report.output_tokens:,} out · \\${report.cost_usd:.3f} · {report.duration_s:.1f} s · "
+                f"{report.output_tokens:,} out · {money(report.cost_usd)} · {report.duration_s:.1f} s · "
                 f"log: {report.log_path}"
             )
 
@@ -429,7 +430,7 @@ def show_result(result: RunResult) -> None:
 
     st.caption(
         f"{result.steps} steps · tokens {result.input_tokens:,} in · {result.cache_write_tokens:,} cache write "
-        f"· {result.cache_read_tokens:,} cache read · {result.output_tokens:,} out · \\${result.cost_usd:.3f} "
+        f"· {result.cache_read_tokens:,} cache read · {result.output_tokens:,} out · {money(result.cost_usd)} "
         f"· {result.duration_s:.1f} s · log: {result.log_path}"
     )
 
@@ -480,8 +481,14 @@ def turn_tokens(turns: list[dict[str, Any]]) -> int:
     )
 
 
+def money(cost: float | None) -> str:
+    """A cost for markdown text: $ escaped so it is not read as LaTeX."""
+    return escape_dollars(format_cost(cost, digits=3)) if cost is not None else "cost unknown"
+
+
 def turn_cost(turns: list[dict[str, Any]]) -> float:
-    return sum(t["result"].cost_usd for t in turns if t["result"])
+    """Known costs of the finished turns; a turn with an unknown cost adds nothing."""
+    return sum(t["result"].cost_usd or 0.0 for t in turns if t["result"])
 
 
 def new_conversation() -> None:

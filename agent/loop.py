@@ -52,7 +52,7 @@ from agent.events import (
 from agent.memory import DatasetMemory, MemoryFullError, memory_context
 from agent.prompts import SKILLS_PROMPT, SYSTEM_PROMPT
 from agent.skills_loader import Skill, skills_list
-from agent.usage import cost_usd, usage_counts
+from agent.usage import add_costs, request_cost, usage_counts
 from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
@@ -160,6 +160,8 @@ class AgentState:
     output_tokens: int = 0
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
+    # Summed request by request; None once a request's price is unknown.
+    cost_usd: float | None = 0.0
     # Mark the prompt for caching (tools + system, and the conversation so far).
     cache: bool = True
     api_seconds: float = 0.0
@@ -230,8 +232,8 @@ class RunResult:
     # input_tokens is the uncached part; the whole prompt also includes these.
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
-    # Price of every token of the run, the verification included.
-    cost_usd: float = 0.0
+    # Price of every token of the run, the verification included; None if unknown.
+    cost_usd: float | None = 0.0
     waiting_for: InteractionKind | None = None
     question: str | None = None
     options: list[str] | None = None
@@ -617,6 +619,9 @@ def continue_run(
             state.cache_write_tokens += cache_write
             state.cache_read_tokens += cache_read
             state.output_tokens += tokens_out
+            state.cost_usd = add_costs(
+                state.cost_usd, request_cost(state.model, tokens_in, cache_write, cache_read, tokens_out)
+            )
             emit(
                 ApiCallFinished(
                     step=step,
@@ -822,7 +827,10 @@ def continue_run(
         verify_write = report.cache_write_tokens if report else 0
         verify_read = report.cache_read_tokens if report else 0
         verify_cost = report.cost_usd if report else 0.0
-        agent_cost = cost_usd(state.input_tokens, state.cache_write_tokens, state.cache_read_tokens, state.output_tokens)
+        agent_cost = state.cost_usd
+        total_cost = add_costs(agent_cost, verify_cost)
+        if total_cost is None:
+            warnings.append("No prices in config.py for a model of this run; the cost is unknown.")
         state.log.update(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
@@ -844,7 +852,7 @@ def continue_run(
                 "cache_write_tokens": state.cache_write_tokens + verify_write,
                 "cache_read_tokens": state.cache_read_tokens + verify_read,
                 "output_tokens": state.output_tokens + verify_out,
-                "cost_usd": round(agent_cost + verify_cost, 5),
+                "cost_usd": rounded(total_cost),
                 "duration_s": round(state.active_seconds, 2),
                 "api_duration_s": round(state.api_seconds, 2),
                 "code_duration_s": round(state.code_seconds, 2),
@@ -853,14 +861,14 @@ def continue_run(
                     "cache_write_tokens": state.cache_write_tokens,
                     "cache_read_tokens": state.cache_read_tokens,
                     "output_tokens": state.output_tokens,
-                    "cost_usd": round(agent_cost, 5),
+                    "cost_usd": rounded(agent_cost),
                 },
                 "verification": {
                     "input_tokens": verify_in,
                     "cache_write_tokens": verify_write,
                     "cache_read_tokens": verify_read,
                     "output_tokens": verify_out,
-                    "cost_usd": round(verify_cost, 5),
+                    "cost_usd": rounded(verify_cost),
                     "duration_s": report.duration_s if report else 0.0,
                 },
                 "prompt_cache": state.cache,
@@ -880,7 +888,7 @@ def continue_run(
             log_path=state.log_path.as_posix(),
             cache_write_tokens=state.cache_write_tokens + verify_write,
             cache_read_tokens=state.cache_read_tokens + verify_read,
-            cost_usd=agent_cost + verify_cost,
+            cost_usd=total_cost,
             waiting_for=pending_now.kind if pending_now else None,
             question=pending_now.question if pending_now else None,
             options=pending_now.options if pending_now else None,
@@ -1062,6 +1070,10 @@ def revision_request(report: VerificationReport) -> str:
         "Write it as a normal final answer to the user: do not mention the fact-check, "
         "and do not add headings such as \"Corrected answer\" or \"What changed\"."
     )
+
+
+def rounded(cost: float | None) -> float | None:
+    return None if cost is None else round(cost, 5)
 
 
 def safe_emitter(on_event: EventHandler | None) -> EventHandler:

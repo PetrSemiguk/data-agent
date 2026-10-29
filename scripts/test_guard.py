@@ -7,7 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from agent.guard import HINT_CHART, HINT_EXPORT, HINT_OTHER, check_code  # noqa: E402
+from agent.guard import HINT_CHART, HINT_EXPORT, HINT_OTHER, HINT_READ, check_code  # noqa: E402
 
 # (code, hint the error must contain)
 BLOCKED = [
@@ -44,6 +44,22 @@ BLOCKED = [
     ("np.save('out.npy', df.values)", HINT_EXPORT),
     ("plt.savefig('chart.png')", HINT_CHART),
     ("fig, ax = plt.subplots()\nfig.savefig('chart.png')", HINT_CHART),
+    # Reading is allowed only inside data/ and uploads/ of the project
+    ("open('evals/questions.json').read()", HINT_READ),
+    ("import json\njson.load(open('evals/questions.json'))", HINT_READ),
+    ("pd.read_csv('data/../evals/results/x.json')", HINT_READ),
+    ("pd.read_csv('../other_project/data.csv')", HINT_READ),
+    ("open('C:/Windows/win.ini')", HINT_READ),
+    ("np.load('/etc/passwd')", HINT_READ),
+    ("from pathlib import Path\nPath('agent/prompts.py').read_text()", HINT_READ),
+    ("path = 'data/x.csv'\npd.read_csv(path)", HINT_READ),
+    ("pd.read_excel(f'data/{name}.xlsx')", HINT_READ),
+    ("from pathlib import Path\np = Path('data/x.csv')\np.read_text()", HINT_READ),
+    ("import os\nos.listdir('data')", HINT_READ),
+    ("import glob\nglob.glob('*.csv')", HINT_READ),
+    ("import os\nfor root, dirs, files in os.walk('.'):\n    pass", HINT_READ),
+    ("from pathlib import Path\nlist(Path('.').iterdir())", HINT_READ),
+    ("import os\nos.scandir('.')", HINT_READ),
 ]
 
 ALLOWED = [
@@ -59,6 +75,11 @@ ALLOWED = [
     "import numpy as np\nnp.mean([1, 2, 3])",
     "from scipy import stats\nstats.ttest_ind([1, 2, 3], [2, 3, 4])",
     "def broken(:",  # a syntax error is left for Python to report
+    "pd.read_csv('data/Titanic-Dataset.csv')",
+    "pd.read_csv('uploads/my_file.csv')",
+    "from pathlib import Path\nPath('data/x.csv').read_text()",
+    "from pathlib import Path\npd.read_csv(Path('data') / 'x.csv')",
+    "import io\npd.read_csv(io.StringIO('a,b\\n1,2'))",
 ]
 
 passed = 0

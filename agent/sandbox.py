@@ -18,8 +18,37 @@ from agent.config import CODE_TIMEOUT_SECONDS, MATPLOTLIB_RC_PARAMS, PANDAS_DISP
 # IPython colors tracebacks with ANSI escape codes; the model does not need them.
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
+# The kernel's working folder: relative paths in model code start here, and
+# the guard checks them against this folder too.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 # How long to wait for the kernel to become idle after an interrupt.
 INTERRUPT_GRACE_SECONDS = 5.0
+
+# Defined in the kernel at startup. Runs code in a separate namespace (a dict
+# kept in _sandbox_namespaces) that holds only df, pd, np and plt, so the code
+# cannot see or overwrite the kernel's own variables. Like a notebook cell, the
+# value of a last expression is returned, and IPython shows it as the result.
+NAMESPACE_RUNNER = '''
+def _sandbox_run_in(_name, _code):
+    import ast
+    import linecache
+
+    spaces = globals().setdefault("_sandbox_namespaces", {})
+    if _name not in spaces:
+        # With pandas copy-on-write a shallow copy shares memory with df, yet
+        # no change made through it, inplace=True included, ever reaches df.
+        spaces[_name] = {"df": df.copy(deep=False), "pd": pd, "np": np, "plt": plt}
+    namespace = spaces[_name]
+    filename = f"<{_name}>"
+    # Lets tracebacks show the failing source line.
+    linecache.cache[filename] = (len(_code), None, _code.splitlines(True), filename)
+    tree = ast.parse(_code, filename)
+    last = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
+    exec(compile(tree, filename, "exec"), namespace)
+    if last is not None:
+        return eval(compile(ast.Expression(last.value), filename, "eval"), namespace)
+'''
 
 
 @dataclass
@@ -48,7 +77,7 @@ class Sandbox:
         # replaces its "python" command with sys.executable, i.e. the venv Python.
         # Encrypt kernel traffic with CurveZMQ; fail loudly if that is impossible.
         self._km = KernelManager(kernel_name="python3", transport_encryption="required")
-        self._km.start_kernel()
+        self._km.start_kernel(cwd=str(PROJECT_ROOT))
         self._kc = self._km.client()
         self._kc.start_channels()
         self._kc.wait_for_ready(timeout=60)
@@ -75,8 +104,19 @@ class Sandbox:
         self._df_path = path
         return result
 
-    def execute(self, code: str, timeout: float = CODE_TIMEOUT_SECONDS) -> ExecutionResult:
-        """Run code in the kernel and collect its output until the kernel is idle."""
+    def execute(
+        self,
+        code: str,
+        timeout: float = CODE_TIMEOUT_SECONDS,
+        namespace: str | None = None,
+    ) -> ExecutionResult:
+        """Run code in the kernel and collect its output until the kernel is idle.
+
+        With `namespace`, the code runs in that separate namespace instead of the
+        kernel's globals; it is created on first use with a copy of df.
+        """
+        if namespace is not None:
+            code = f"_sandbox_run_in({namespace!r}, {code!r})"
         kc = self._client()
         msg_id = kc.execute(code)
         deadline = time.monotonic() + timeout
@@ -135,6 +175,10 @@ class Sandbox:
             images=images,
         )
 
+    def drop_namespace(self, namespace: str) -> None:
+        """Delete a separate namespace and every variable created in it."""
+        self.execute(f"globals().get('_sandbox_namespaces', {{}}).pop({namespace!r}, None)\npass")
+
     def restart(self) -> None:
         """Restart the kernel. All variables, including df, are lost."""
         if self._km is None:
@@ -178,7 +222,7 @@ class Sandbox:
         imports = "import numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt"
         # Set after %matplotlib inline, which applies its own rc defaults.
         rc_params = f"plt.rcParams.update({MATPLOTLIB_RC_PARAMS!r})"
-        result = self.execute(f"%matplotlib inline\n{imports}\n{options}\n{rc_params}")
+        result = self.execute(f"%matplotlib inline\n{imports}\n{options}\n{rc_params}\n{NAMESPACE_RUNNER}")
         if not result.success:
             raise RuntimeError(f"Kernel setup failed:\n{result.error}")
 

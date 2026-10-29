@@ -21,10 +21,7 @@ from agent.config import (  # noqa: E402
     MAX_TOTAL_TOKENS,
     MAX_USER_QUESTIONS,
     OUTPUTS_DIR,
-    PRICE_CACHE_READ_PER_MTOK,
-    PRICE_CACHE_WRITE_PER_MTOK,
-    PRICE_INPUT_PER_MTOK,
-    PRICE_OUTPUT_PER_MTOK,
+    MODEL_PRICES,
 )
 import agent.loop  # noqa: E402
 from agent.events import (  # noqa: E402
@@ -50,7 +47,7 @@ from agent.events import (  # noqa: E402
 from agent.loop import HistoryTurn, RunResult, action_record, build_messages, resume_agent, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore  # noqa: E402
 from agent.skills_loader import load_skills  # noqa: E402
-from agent.usage import cost_usd  # noqa: E402
+from agent.usage import request_cost  # noqa: E402
 from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -845,8 +842,9 @@ def main() -> int:
         log = read_log(result)
         sent = client.kwargs[0]
         calls = [e for e in events if isinstance(e, ApiCallFinished)]
-        expected_cost = (90 * PRICE_INPUT_PER_MTOK + 3200 * PRICE_CACHE_WRITE_PER_MTOK
-                         + 3000 * PRICE_CACHE_READ_PER_MTOK + 30 * PRICE_OUTPUT_PER_MTOK) / 1_000_000
+        price = MODEL_PRICES["claude-sonnet-5-5"][0][1]
+        expected_cost = (90 * price["input"] + 3200 * price["cache_write"]
+                         + 3000 * price["cache_read"] + 30 * price["output"]) / 1_000_000
         report("av) prompt caching marks the prompt and counts cache tokens",
                sent["system"][0]["cache_control"] == {"type": "ephemeral"}
                and sent["cache_control"] == {"type": "ephemeral"}
@@ -883,9 +881,47 @@ def main() -> int:
                client.kwargs[1]["cache_control"] == {"type": "ephemeral"} and v is not None
                and v.cache_write_tokens == 1000 and v.cache_read_tokens == 500
                and result.cache_write_tokens == 1000 and result.input_tokens == 120
-               and abs(result.cost_usd - (cost_usd(100, 0, 0, 10) + v.cost_usd)) < 1e-12,
+               and abs(result.cost_usd - (request_cost("claude-sonnet-5-5", 100, 0, 0, 10) + v.cost_usd)) < 1e-12,
                f"verifier: write={v.cache_write_tokens if v else '-'} read={v.cache_read_tokens if v else '-'} "
                f"cost=${v.cost_usd if v else 0:.6f}; run cost=${result.cost_usd:.6f}")
+        cleanup(result)
+
+        # ay) The verifier on Haiku 5.5 is priced with Haiku prices, per request
+        client = FakeClient([
+            make_response([text("Revenue is 10.")], "end_turn", tokens_in=100, tokens_out=10),
+            make_response([report_use([CLAIM_OK])], "tool_use", tokens_in=1000, tokens_out=100),
+        ])
+        result = run_agent("Q", sb, client, verify=True, verifier_model="claude-haiku-5-5")  # type: ignore[arg-type]
+        haiku = MODEL_PRICES["claude-haiku-5-5"][0][1]
+        expected = (1000 * haiku["input"] + 100 * haiku["output"]) / 1_000_000
+        report("ay) verifier on Haiku priced with Haiku prices",
+               client.kwargs[1]["model"] == "claude-haiku-5-5" and result.verification is not None
+               and abs((result.verification.cost_usd or 0) - expected) < 1e-12,
+               f"verifier cost=${result.verification.cost_usd if result.verification else 0:.6f} (expected ${expected:.6f})")
+        cleanup(result)
+
+        # az) Haiku 5.5 charges more for a request whose prompt is over 100,000 tokens
+        long_tier = MODEL_PRICES["claude-haiku-5-5"][1][1]
+        short = request_cost("claude-haiku-5-5", 50_000, 0, 50_000, 0)
+        long = request_cost("claude-haiku-5-5", 50_000, 0, 50_001, 0)
+        report("az) Haiku long-prompt tier",
+               short is not None and long is not None
+               and abs(long - (50_000 * long_tier["input"] + 50_001 * long_tier["cache_read"]) / 1e6) < 1e-12
+               and long > short * 4,
+               f"100,000-token prompt ${short:.5f}, 100,001-token prompt ${long:.5f}")
+
+        # ba) An unknown model gets an unknown cost and a warning, never another model's prices
+        client = FakeClient([
+            make_response([text("Revenue is 10.")], "end_turn"),
+            make_response([report_use([CLAIM_OK])], "tool_use"),
+        ])
+        result = run_agent("Q", sb, client, verify=True, verifier_model="claude-unknown-1")  # type: ignore[arg-type]
+        log = read_log(result)
+        report("ba) unknown model -> cost unknown + warning",
+               result.verification is not None and result.verification.cost_usd is None and result.cost_usd is None
+               and log is not None and log["totals"]["cost_usd"] is None
+               and any("No prices" in w for w in log["warnings"]),
+               f"run cost={result.cost_usd}, warnings={log['warnings'] if log else '-'}")
         cleanup(result)
 
         # g) A crashing event handler does not break the run

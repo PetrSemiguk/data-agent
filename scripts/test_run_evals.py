@@ -15,6 +15,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "evals"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
+import agent.tools  # noqa: E402
 import run_evals  # noqa: E402
 from test_loop import FakeClient, make_response, text, tool_use  # noqa: E402
 
@@ -96,7 +97,7 @@ def main() -> int:
                code == 0 and done == ["d01__r1.json"] and "Stopping: $0.500 spent" in out,
                next(line for line in out.splitlines() if line.startswith("Stopping")))
 
-        # f) Code that reads the eval set is flagged; reading data/ is not
+        # f) Code that reads the eval set is blocked by the guard (and still flagged); reading data/ is not
         client = FakeClient([
             make_response([tool_use("import json\nq = json.load(open('evals/questions.json'))\nlen(q)")], "tool_use"),
             make_response([text("891.")], "end_turn"),
@@ -106,10 +107,29 @@ def main() -> int:
         code, out = run(["--split", "dev", "--ids", "d01", "--repeats", "2", *base, "--name", "f2", "--yes"], client)
         bad = json.loads((root / "f2" / "d01__r1.json").read_text(encoding="utf-8"))
         good = json.loads((root / "f2" / "d01__r2.json").read_text(encoding="utf-8"))
-        report("f) integrity violation caught",
-               bad["integrity_violation"] and "evals/questions.json" in bad["integrity_quotes"][0]
-               and not good["integrity_violation"] and "INTEGRITY VIOLATION" in out,
-               f"quote: {bad['integrity_quotes']}; data/ read flagged: {good['integrity_violation']}")
+        blocked_output = json.loads(Path(bad["log_path"]).read_text(encoding="utf-8"))["steps"][0]["tool_calls"][0]["output"]
+        report("f) guard blocks reading the eval set",
+               bad["guard_blocks"] == 1 and "Reading files outside the dataset folder is blocked" in blocked_output
+               and bad["integrity_violation"] and "evals/questions.json" in bad["integrity_quotes"][0]
+               and good["guard_blocks"] == 0 and not good["integrity_violation"] and "INTEGRITY VIOLATION" in out,
+               f"guard: {blocked_output.splitlines()[1]}; integrity quote: {bad['integrity_quotes']}")
+
+        # h) With the guard switched off, the integrity check is still the second line of defense
+        guard = agent.tools.check_code
+        agent.tools.check_code = lambda code: None
+        try:
+            client = FakeClient([
+                make_response([tool_use("import os\nos.listdir('.')")], "tool_use"),
+                make_response([text("891.")], "end_turn"),
+            ])
+            code, out = run(["--split", "dev", "--ids", "d01", *base, "--name", "h", "--yes"], client)
+        finally:
+            agent.tools.check_code = guard
+        record = json.loads((root / "h" / "d01__r1.json").read_text(encoding="utf-8"))
+        report("h) guard off -> integrity check still catches",
+               record["guard_blocks"] == 0 and record["integrity_violation"]
+               and "os.listdir('.')" in record["integrity_quotes"][0],
+               f"guard blocks={record['guard_blocks']}, quotes={record['integrity_quotes']}")
 
         # g) The checker on its own: browsing folders and reading outside data/ are flagged
         log = {"steps": [{"step": 1, "tool_calls": [

@@ -14,6 +14,7 @@ from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint  # noqa: E402
 from agent.skills_loader import load_skills  # noqa: E402
+from agent.usage import format_cost  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.tools import ApprovalRequest  # noqa: E402
 
@@ -109,7 +110,7 @@ def main() -> int:
         print(f"\n{result.final_answer}")
     print(
         f"\nSteps: {result.steps}, tokens in={result.input_tokens} cache_write={result.cache_write_tokens} "
-        f"cache_read={result.cache_read_tokens} out={result.output_tokens}, cost ${result.cost_usd:.4f}, "
+        f"cache_read={result.cache_read_tokens} out={result.output_tokens}, cost {format_cost(result.cost_usd)}, "
         f"time {result.duration_s:.1f}s"
     )
     for path in result.exports:

@@ -24,6 +24,7 @@ from agent.events import (
     VerificationStarted,
     VerifierEvent,
 )
+from agent.usage import format_cost
 
 SEPARATOR = "-" * 80
 PLAN_MARKS = {"pending": "☐", "in_progress": "▶", "done": "✔", "skipped": "✖"}
@@ -139,7 +140,7 @@ class ConsolePrinter:
                     f"\n{SEPARATOR}\n"
                     f"Tokens used: input={result.input_tokens}, cache_write={result.cache_write_tokens}, "
                     f"cache_read={result.cache_read_tokens}, output={result.output_tokens}; "
-                    f"cost ${result.cost_usd:.4f}"
+                    f"cost {format_cost(result.cost_usd)}"
                 )
                 print(
                     f"Time: total={result.duration_s:.1f}s, API={event.api_duration_s:.1f}s, "
@@ -150,7 +151,7 @@ class ConsolePrinter:
                         f"  of them verification: input={result.verification.input_tokens}, "
                         f"cache_write={result.verification.cache_write_tokens}, "
                         f"cache_read={result.verification.cache_read_tokens}, "
-                        f"output={result.verification.output_tokens}; cost ${result.verification.cost_usd:.4f}"
+                        f"output={result.verification.output_tokens}; cost {format_cost(result.verification.cost_usd)}"
                     )
                 print(f"Saved charts ({len(result.charts)}):")
                 for chart in result.charts:

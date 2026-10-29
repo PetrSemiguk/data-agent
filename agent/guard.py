@@ -2,7 +2,8 @@
 
 This protects against MISTAKES of the model (deleting files, writing data
 files past export_data, saving charts past save_chart, shell or network
-calls), not against deliberately malicious code. The check reads the code
+calls, reading files other than the datasets), not against deliberately
+malicious code. The check reads the code
 with `ast`, so it sees what is called, not text that merely looks similar.
 It can still be bypassed, e.g. with getattr(), importlib, or names built
 from strings at run time. Real isolation comes from running the kernel in a
@@ -11,6 +12,13 @@ Docker container (stage 6).
 
 import ast
 import re
+from pathlib import Path
+
+from agent.config import READABLE_DIRS
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# Relative paths are read from the project root: the sandbox starts the kernel there.
+ALLOWED_READ_DIRS = tuple((PROJECT_ROOT / folder).resolve() for folder in READABLE_DIRS)
 
 # Modules whose import alone is blocked: shell commands and network access.
 BLOCKED_MODULES = {
@@ -58,6 +66,25 @@ LOOKS_LIKE_MODE = re.compile(r"^[rwxabt+]+$")
 HINT_EXPORT = "To give the user a data file, use the export_data tool (it asks the user first)."
 HINT_CHART = "To save a chart, use the save_chart tool; the figure is captured automatically."
 HINT_OTHER = "This sandbox does not allow it. Do the analysis with pandas, numpy and scipy on `df`."
+HINT_READ = "Reading files outside the dataset folder is blocked; the dataset is already loaded as df."
+
+# Calls that read a file, with the position and keyword names of their path argument.
+READ_FUNCTIONS: dict[str, tuple[int, tuple[str, ...]]] = {
+    "open": (0, ("file",)),
+    "io.open": (0, ("file",)),
+    "numpy.load": (0, ("file",)),
+    "numpy.loadtxt": (0, ("fname",)),
+    "numpy.genfromtxt": (0, ("fname",)),
+    "numpy.fromfile": (0, ("file",)),
+}
+PANDAS_PATH_KEYWORDS = ("filepath_or_buffer", "io", "path_or_buf", "path", "path_or_buffer")
+# Path(...) methods that read the file the Path points to.
+PATH_READ_METHODS = {"read_text", "read_bytes", "open"}
+# Listing folders is never needed: the dataset is already loaded.
+BROWSE_CALLS = {"listdir", "scandir", "walk", "glob", "iglob", "rglob", "iterdir", "chdir"}
+PATH_CONSTRUCTORS = {"Path", "pathlib.Path", "PurePath", "pathlib.PurePath", "os.path.join"}
+IN_MEMORY_BUFFERS = {"io.StringIO", "io.BytesIO", "StringIO", "BytesIO"}
+
 MAX_REPORTED = 3
 
 
@@ -107,8 +134,9 @@ def _import_aliases(tree: ast.Module) -> dict[str, str]:
         elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    # The kernel imports numpy as np at startup.
+    # The kernel imports numpy as np and pandas as pd at startup.
     aliases.setdefault("np", "numpy")
+    aliases.setdefault("pd", "pandas")
     return aliases
 
 
@@ -136,7 +164,10 @@ def _check_call(node: ast.Call, aliases: dict[str, str]) -> tuple[str, str] | No
         mode = _mode_argument(node, position=1)
         if mode is None or WRITE_MODE.search(mode):
             return f"open(..., mode={mode!r}) writes a file", HINT_EXPORT
-        return None
+
+    read = _check_read(node, name, aliases)
+    if read:
+        return read, HINT_READ
 
     if not isinstance(node.func, ast.Attribute):
         return None
@@ -153,6 +184,82 @@ def _check_call(node: ast.Call, aliases: dict[str, str]) -> tuple[str, str] | No
         if mode is not None and LOOKS_LIKE_MODE.match(mode) and WRITE_MODE.search(mode):
             return f".open(mode={mode!r}) writes a file", HINT_EXPORT
     return None
+
+
+def _check_read(node: ast.Call, name: str | None, aliases: dict[str, str]) -> str | None:
+    """A problem if the call reads a file outside the allowed folders or lists folders."""
+    called = name or (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+    if called.split(".")[-1] in BROWSE_CALLS:
+        return f"{called}() looks through folders"
+    if name in READ_FUNCTIONS:
+        position, keywords = READ_FUNCTIONS[name]
+        target = _argument(node, position, keywords)
+    elif name and name.startswith("pandas.read_") and name != "pandas.read_clipboard":
+        target = _argument(node, 0, PANDAS_PATH_KEYWORDS)
+    elif isinstance(node.func, ast.Attribute) and node.func.attr in PATH_READ_METHODS:
+        mode = _mode_argument(node, position=0) if node.func.attr == "open" else "r"
+        if mode and LOOKS_LIKE_MODE.match(mode) and WRITE_MODE.search(mode):
+            return None  # .open("w"): a write, reported by the write check
+        owner = node.func.value
+        is_path = isinstance(owner, ast.Call) and _dotted(owner.func, aliases) in PATH_CONSTRUCTORS
+        # p.read_text() / p.open() on a variable: the path is not known before running.
+        target = owner if is_path else None
+        if target is None:
+            return f".{node.func.attr}() reads a file whose path is not known before running"
+    else:
+        return None
+    if target is None:
+        return None if name == "open" else f"{called}() without a file path"
+    path = _static_path(target, aliases)
+    if path == "<buffer>":
+        return None
+    if path is None:
+        return f"{called}() reads a file whose path is built at run time"
+    if not _readable(path):
+        return f"{called}({path!r}) reads outside the dataset folder"
+    return None
+
+
+def _argument(node: ast.Call, position: int, keywords: tuple[str, ...]) -> ast.expr | None:
+    for keyword in node.keywords:
+        if keyword.arg in keywords:
+            return keyword.value
+    return node.args[position] if len(node.args) > position else None
+
+
+def _dotted(node: ast.expr, aliases: dict[str, str]) -> str | None:
+    return _dotted_name(node, aliases)
+
+
+def _static_path(node: ast.expr, aliases: dict[str, str]) -> str | None:
+    """The path a node stands for, if it can be known without running the code.
+
+    "<buffer>" for an in-memory buffer such as io.StringIO(...), which is not a file.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [v.value for v in node.values if isinstance(v, ast.Constant)]
+        return "".join(parts) if len(parts) == len(node.values) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left, right = _static_path(node.left, aliases), _static_path(node.right, aliases)
+        return str(Path(left) / right) if left and right and "<buffer>" not in (left, right) else None
+    if isinstance(node, ast.Call):
+        name = _dotted(node.func, aliases)
+        if name in IN_MEMORY_BUFFERS:
+            return "<buffer>"
+        if name in PATH_CONSTRUCTORS and node.args and not node.keywords:
+            parts = [_static_path(arg, aliases) for arg in node.args]
+            if all(p and p != "<buffer>" for p in parts):
+                return str(Path(*parts))  # type: ignore[arg-type]
+    return None
+
+
+def _readable(path: str) -> bool:
+    """True if the normalized path is inside data/ or uploads/ of the project."""
+    candidate = Path(path).expanduser()
+    resolved = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
+    return any(resolved == folder or folder in resolved.parents for folder in ALLOWED_READ_DIRS)
 
 
 def _mode_argument(node: ast.Call, position: int) -> str | None:

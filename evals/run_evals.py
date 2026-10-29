@@ -37,6 +37,7 @@ from dotenv import load_dotenv  # noqa: E402
 from agent.loop import RunResult, create_client, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.skills_loader import load_skills  # noqa: E402
+from agent.usage import format_cost  # noqa: E402
 
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
 RESULTS_DIR = EVALS_DIR / "results"
@@ -119,7 +120,9 @@ def estimate_cost_per_run(results_root: Path, config: dict[str, Any]) -> tuple[f
         if manifest.get("config") != config:
             continue
         for result in manifest_path.parent.glob("*__r*.json"):
-            costs.append(json.loads(result.read_text(encoding="utf-8"))["cost"]["total"])
+            cost = json.loads(result.read_text(encoding="utf-8"))["cost"]["total"]
+            if cost is not None:
+                costs.append(cost)
     if costs:
         return sum(costs) / len(costs), f"average of {len(costs)} earlier runs with the same settings"
     return DEFAULT_COST_PER_RUN, "default constant (no earlier runs with the same settings)"
@@ -177,6 +180,8 @@ def record_of(question: dict[str, Any], repeat: int, result: RunResult) -> dict[
     quotes = integrity_check(log)
     report = result.verification
     verify_cost = report.cost_usd if report else 0.0
+    # None when a model has no prices in config.py; the run then has an unknown cost.
+    agent_cost = None if result.cost_usd is None or verify_cost is None else result.cost_usd - verify_cost
     return {
         "id": question["id"],
         "repeat": repeat,
@@ -193,7 +198,7 @@ def record_of(question: dict[str, Any], repeat: int, result: RunResult) -> dict[
             "cache_read": result.cache_read_tokens,
             "output": result.output_tokens,
         },
-        "cost": {"agent": result.cost_usd - verify_cost, "verification": verify_cost, "total": result.cost_usd},
+        "cost": {"agent": agent_cost, "verification": verify_cost, "total": result.cost_usd},
         "duration_s": result.duration_s,
         "loaded_skills": result.loaded_skills,
         "plan_incomplete": result.plan_incomplete,
@@ -296,7 +301,10 @@ def main(
     load_dotenv(PROJECT_ROOT / ".env")
     client = client or create_client()
     skills = None if args.no_skills else load_skills()[0]
-    spent = sum(json.loads((out_dir / f"{i}__r{r}.json").read_text(encoding="utf-8"))["cost"]["total"] for i, r in done)
+    # A run with an unknown cost (no prices for its model) cannot count towards the limit.
+    spent = sum(
+        json.loads((out_dir / f"{i}__r{r}.json").read_text(encoding="utf-8"))["cost"]["total"] or 0.0 for i, r in done
+    )
     finished = 0
     for question, repeat in todo:
         # Stop before a run that would likely cross the limit, using the average so far.
@@ -308,12 +316,14 @@ def main(
         record = run_one(question, repeat, args, client, skills, sandbox_factory)
         path = out_dir / f"{question['id']}__r{repeat}.json"
         path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        spent += record["cost"]["total"]
+        spent += record["cost"]["total"] or 0.0
+        if record["cost"]["total"] is None:
+            print("  Warning: no prices for a model of this run in config.py; --max-cost cannot count its cost.")
         finished += 1
         flag = "  INTEGRITY VIOLATION" if record["integrity_violation"] else ""
         print(
             f"[{finished}/{len(todo)}] {question['id']} r{repeat}: {record['status']}, {record['steps']} steps, "
-            f"${record['cost']['total']:.3f}, {time.perf_counter() - start:.1f}s, total ${spent:.3f}{flag}",
+            f"{format_cost(record['cost']['total'], 3)}, {time.perf_counter() - start:.1f}s, total ${spent:.3f}{flag}",
             flush=True,
         )
 
@@ -327,9 +337,9 @@ def print_summary(out_dir: Path) -> None:
     for r in records:
         revised = "-" if not r["verification"] else ("failed" if r["verification"]["revision_failed"] else str(r["verification"]["revised"]))
         flag = "  INTEGRITY VIOLATION" if r["integrity_violation"] else ""
-        print(f"{r['id']:4} {r['repeat']:>3} {r['status']:16} {r['steps']:>5} {r['cost']['total']:>7.3f} "
+        print(f"{r['id']:4} {r['repeat']:>3} {r['status']:16} {r['steps']:>5} {format_cost(r['cost']['total'], 3):>7} "
               f"{r['duration_s']:>7.1f} {revised:8} {','.join(r['loaded_skills']) or '-'}{flag}")
-    total = sum(r["cost"]["total"] for r in records)
+    total = sum(r["cost"]["total"] or 0.0 for r in records)
     print(f"Total: {len(records)} runs, ${total:.3f}")
 
 
