@@ -699,7 +699,9 @@ def revision_request(report: VerificationReport) -> str:
         "A fact-checker recomputed the claims of your answer from the data and found "
         f"these claims wrong:\n\n{remarks}\n\n"
         "Check these points (you may run code), then give the complete corrected final "
-        "answer to the original question. Keep the parts that were not contradicted."
+        "answer to the original question. Keep the parts that were not contradicted. "
+        "Write it as a normal final answer to the user: do not mention the fact-check, "
+        "and do not add headings such as \"Corrected answer\" or \"What changed\"."
     )
 
 
