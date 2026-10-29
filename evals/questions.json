@@ -676,5 +676,370 @@
       }
     ],
     "reference": "f05_houses_price_per_sqft_zipcodes"
+  },
+  {
+    "id": "x01",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_hard",
+    "question": "Rank the five product sub-categories with the highest total sales, and give the total sales of the top two.",
+    "category": "aggregation",
+    "traps": [
+      "The top two sub-categories differ by less than 0.5% of sales, and the fourth and fifth by under 2%"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "top_subcategories",
+        "description": "Sub-categories by total sales, highest first",
+        "items": [
+          "Phones",
+          "Chairs",
+          "Storage",
+          "Tables",
+          "Binders"
+        ],
+        "top_k": 5,
+        "order": "descending"
+      },
+      {
+        "type": "number",
+        "key": "first_sales",
+        "description": "Total sales of the sub-category ranked first",
+        "value": 330007.054,
+        "rel_tol": 0.002
+      },
+      {
+        "type": "number",
+        "key": "second_sales",
+        "description": "Total sales of the sub-category ranked second",
+        "value": 328449.103,
+        "rel_tol": 0.002
+      }
+    ],
+    "reference": "x01_superstore_top_subcategories"
+  },
+  {
+    "id": "x02",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_hard",
+    "question": "Among product sub-categories with at least $10,000 of sales in 2016, which one had the largest percentage sales growth from 2016 to 2017 (by order date)? Give its sales in both years and the growth.",
+    "category": "multi_step",
+    "traps": [
+      "The filter on 2016 sales must be applied before ranking by growth"
+    ],
+    "checks": [
+      {
+        "type": "label",
+        "key": "fastest_subcategory",
+        "description": "Sub-category with the largest sales growth from 2016 to 2017",
+        "value": "Appliances"
+      },
+      {
+        "type": "number",
+        "key": "sales_2016",
+        "description": "Its sales in 2016",
+        "value": 26050.315,
+        "rel_tol": 0.005
+      },
+      {
+        "type": "number",
+        "key": "sales_2017",
+        "description": "Its sales in 2017",
+        "value": 42926.932,
+        "rel_tol": 0.005
+      },
+      {
+        "type": "number",
+        "key": "growth_pct",
+        "description": "Its sales growth from 2016 to 2017, in percent",
+        "value": 64.784695,
+        "abs_tol": 0.5
+      }
+    ],
+    "reference": "x02_superstore_fastest_growth"
+  },
+  {
+    "id": "x03",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_hard",
+    "question": "What is the average discount across all order lines, and what is the sales-weighted average discount (each line's discount weighted by its Sales)? Give both in percent.",
+    "category": "aggregation",
+    "traps": [
+      "A simple mean of rates and a weighted mean differ; both are asked for"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "mean_discount",
+        "description": "Simple average of Discount over all order lines, in percent",
+        "value": 15.620272,
+        "abs_tol": 0.05
+      },
+      {
+        "type": "number",
+        "key": "weighted_discount",
+        "description": "Sales-weighted average discount, in percent",
+        "value": 14.0424,
+        "abs_tol": 0.05
+      }
+    ],
+    "reference": "x03_superstore_discounts"
+  },
+  {
+    "id": "x04",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_hard",
+    "question": "What share of orders (distinct Order ID) contain at least one loss-making line (Profit below 0)? Among those orders, what share of their total sales comes from the loss-making lines themselves?",
+    "category": "multi_step",
+    "traps": [
+      "The two shares have different denominators: all orders, then the sales of the orders with a loss"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "orders_with_loss",
+        "description": "Number of orders with at least one loss-making line",
+        "value": 1318.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "number",
+        "key": "share_orders_pct",
+        "description": "Share of all orders that have at least one loss-making line, in percent",
+        "value": 26.312637,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "loss_lines_sales_pct",
+        "description": "Share of those orders' total sales that comes from their loss-making lines, in percent",
+        "value": 64.303107,
+        "abs_tol": 0.1
+      }
+    ],
+    "reference": "x04_superstore_loss_orders"
+  },
+  {
+    "id": "x05",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev_hard",
+    "question": "What was the survival rate for each combination of passenger class and sex? Give all six rates in percent.",
+    "category": "group_comparison",
+    "traps": [
+      "Six numbers; group sizes differ a lot"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "first_female",
+        "description": "Survival rate of first-class women, in percent",
+        "value": 96.808511,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "first_male",
+        "description": "Survival rate of first-class men, in percent",
+        "value": 36.885246,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "second_female",
+        "description": "Survival rate of second-class women, in percent",
+        "value": 92.105263,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "second_male",
+        "description": "Survival rate of second-class men, in percent",
+        "value": 15.740741,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "third_female",
+        "description": "Survival rate of third-class women, in percent",
+        "value": 50.0,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "third_male",
+        "description": "Survival rate of third-class men, in percent",
+        "value": 13.544669,
+        "abs_tol": 0.1
+      }
+    ],
+    "reference": "x05_titanic_class_sex"
+  },
+  {
+    "id": "x06",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev_hard",
+    "question": "Of the passengers who embarked at Southampton, what share travelled in third class? What share of those third-class Southampton passengers survived? And what share of all passengers in the dataset were third-class Southampton passengers who survived?",
+    "category": "multi_step",
+    "traps": [
+      "Three shares with three different denominators"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "third_share_of_s",
+        "description": "Share of Southampton passengers in third class, in percent",
+        "value": 54.813665,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "survival_third_s",
+        "description": "Survival rate of third-class Southampton passengers, in percent",
+        "value": 18.98017,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "third_s_survivors_of_all",
+        "description": "Third-class Southampton survivors as a share of all passengers, in percent",
+        "value": 7.519641,
+        "abs_tol": 0.1
+      }
+    ],
+    "reference": "x06_titanic_southampton"
+  },
+  {
+    "id": "x07",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev_hard",
+    "question": "In third class, compare the survival rate of children (under 18) with that of adults (18 or older), using only passengers with a known age. How many third-class passengers have no recorded age?",
+    "category": "data_quality_trap",
+    "traps": [
+      "Missing ages change the denominator; they must be excluded and counted"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "child_rate",
+        "description": "Survival rate of third-class children with a known age, in percent",
+        "value": 37.179487,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "adult_rate",
+        "description": "Survival rate of third-class adults with a known age, in percent",
+        "value": 20.216606,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "missing_age",
+        "description": "Number of third-class passengers with no recorded age",
+        "value": 136.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "States how many children and how many adults the two rates are based on"
+      }
+    ],
+    "reference": "x07_titanic_third_class_age"
+  },
+  {
+    "id": "x08",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_hard",
+    "question": "In 2010, which month had the lowest net revenue per trading day? Net revenue is Quantity x Price over all rows after removing exact duplicate rows; a trading day is a date with at least one invoice. Give that month's net revenue per trading day.",
+    "category": "time_series",
+    "traps": [
+      "Months have different numbers of trading days, so the month with the lowest total is not the one with the lowest revenue per trading day; the two lowest months are within 0.5%"
+    ],
+    "checks": [
+      {
+        "type": "label",
+        "key": "lowest_month",
+        "description": "Month of 2010 with the lowest net revenue per trading day",
+        "value": "July"
+      },
+      {
+        "type": "number",
+        "key": "lowest_per_day",
+        "description": "Net revenue per trading day in that month",
+        "value": 22051.295769,
+        "rel_tol": 0.005
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not name the month with the lowest total revenue as the month with the lowest revenue per trading day, unless they are the same month"
+      }
+    ],
+    "reference": "x08_retail_revenue_per_trading_day"
+  },
+  {
+    "id": "x09",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_hard",
+    "question": "In 2011, what share of gross sales was cancelled? Gross sales is Quantity x Price over invoices that do not start with 'C'; cancelled sales is the absolute value of Quantity x Price over invoices that start with 'C'. Remove exact duplicate rows first.",
+    "category": "aggregation",
+    "traps": [
+      "Cancellation values are negative and must be taken as an absolute value"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "gross_2011",
+        "description": "Gross sales in 2011",
+        "value": 9798551.954,
+        "rel_tol": 0.002
+      },
+      {
+        "type": "number",
+        "key": "cancelled_2011",
+        "description": "Cancelled sales in 2011, as a positive amount",
+        "value": 819250.61,
+        "rel_tol": 0.002
+      },
+      {
+        "type": "number",
+        "key": "cancelled_share_pct",
+        "description": "Cancelled sales as a share of gross sales in 2011, in percent",
+        "value": 8.360936,
+        "abs_tol": 0.05
+      }
+    ],
+    "reference": "x09_retail_cancelled_share"
+  },
+  {
+    "id": "x10",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_hard",
+    "question": "Among countries with at least 20 distinct customers, which three have the highest average net revenue per customer? Use Quantity x Price over rows that have a Customer ID, after removing exact duplicate rows. Give the average for the top country.",
+    "category": "multi_step",
+    "traps": [
+      "Small countries must be excluded by the customer threshold before ranking"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "top_countries",
+        "description": "Countries by average net revenue per customer, highest first",
+        "items": [
+          "Netherlands",
+          "Switzerland",
+          "Germany"
+        ],
+        "top_k": 3,
+        "order": "descending"
+      },
+      {
+        "type": "number",
+        "key": "top_country_avg",
+        "description": "Average net revenue per customer of the top country",
+        "value": 23840.465217,
+        "rel_tol": 0.005
+      }
+    ],
+    "reference": "x10_retail_revenue_per_customer"
   }
 ]

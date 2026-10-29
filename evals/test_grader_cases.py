@@ -5,6 +5,7 @@ every check (in check order). Output is also saved to logs/grader_cases.txt.
 Run from the project root:  .venv\\Scripts\\python.exe evals\\test_grader_cases.py
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -113,6 +114,9 @@ CASES = [
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Check the grader on answers with known grades.")
+    parser.add_argument("--judge-model", default=DEFAULT_JUDGE_MODEL)
+    args = parser.parse_args()
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
     load_dotenv(PROJECT_ROOT / ".env")
     client = create_client()
@@ -123,7 +127,7 @@ def main() -> int:
     for qid, name, answer, expected in CASES:
         question = questions[qid]
         assert len(expected) == len(question["checks"]), (qid, name)
-        grade = grade_answer(client, DEFAULT_JUDGE_MODEL, question, answer)
+        grade = grade_answer(client, args.judge_model, question, answer)
         cost = add_costs(cost, grade["judge_cost_usd"])
         lines.append(f"\n{qid} | {name}\n  answer: {answer}")
         for want, check in zip(expected, grade["checks"]):
@@ -137,7 +141,8 @@ def main() -> int:
                 + ("" if ok else f"\n       why: {check['explanation']}")
             )
         print("\n".join(lines[-1 - len(expected):]), flush=True)
-    summary = f"\nGrader accuracy: {right}/{total} checks ({right / total:.1%}), judge cost {format_cost(cost)}"
+    summary = (f"\nGrader accuracy ({args.judge_model}): {right}/{total} checks ({right / total:.1%}), "
+               f"judge cost {format_cost(cost)}")
     lines.append(summary)
     print(summary)
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)

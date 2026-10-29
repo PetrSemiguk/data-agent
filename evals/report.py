@@ -5,9 +5,9 @@ Run from the project root:
     .venv\\Scripts\\python.exe evals\\report.py --compare dev_baseline dev_no_skills
 
 Writes evals/results/<name>/report.md and prints a short summary. The Failures
-section shows expected values and quotes only for the dev split: holdout and
-final failures list only the question id, category and check type, so the
-agent is never tuned on them.
+section shows expected values and quotes only for the tuning splits (dev and
+dev_hard): holdout and final failures list only the question id, category and
+check type, so the agent is never tuned on them.
 """
 
 import argparse
@@ -25,7 +25,9 @@ sys.path.insert(0, str(EVALS_DIR))
 from run_evals import RESULTS_DIR, result_files  # noqa: E402
 
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
-SPLITS = ("dev", "holdout", "final")
+SPLITS = ("dev", "dev_hard", "holdout", "final")
+# Splits whose failures may be looked at in detail (the agent may be tuned on them).
+TUNING_SPLITS = ("dev", "dev_hard")
 
 
 # ------------------------------------------------------------------- loading
@@ -154,7 +156,7 @@ def run_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def failures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every failed check; details only for dev, where tuning on failures is allowed."""
+    """Every failed check; details only for the tuning splits, where looking at failures is allowed."""
     found = []
     for row in rows:
         if not row["grade"]:
@@ -164,7 +166,7 @@ def failures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 continue
             item = {"id": row["id"], "repeat": row["repeat"], "split": row["split"],
                     "category": row["category"], "type": check["type"]}
-            if row["split"] == "dev":
+            if row["split"] in TUNING_SPLITS:
                 item.update(question=row["question"], description=check["description"], expected=check["expected"],
                             extracted=check["extracted"], quote=check["quote"])
             found.append(item)
@@ -266,7 +268,7 @@ def render_report(name: str, s: dict[str, Any], manifest: dict[str, Any]) -> str
     if not fails:
         lines.append("No failed checks.")
     for f in fails:
-        if f["split"] == "dev":
+        if f["split"] in TUNING_SPLITS:
             lines += [
                 f"### {f['id']} r{f['repeat']} - {f['type']} ({f['category']})",
                 "",

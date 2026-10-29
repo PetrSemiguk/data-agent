@@ -15,6 +15,7 @@ import statistics
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Iterator
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,7 @@ def d08() -> dict[str, Any]:
 
 # -------------------------------------------------------- dev: Online Retail II
 
+@cache
 def retail_unique_rows() -> tuple[list[tuple[str, ...]], int, list[str]]:
     """Distinct raw rows (as text) in first-seen order, the row count and the header."""
     with open(DATA_DIR / "online_retail_II.csv", newline="", encoding="utf-8") as file:
@@ -246,7 +248,122 @@ def f05() -> dict[str, Any]:
     return {"top_zipcodes": top, "top_zip_median_per_sqft": medians[top[0]]}
 
 
+# ------------------------------------------------------ dev_hard: Superstore
+
+def x01() -> dict[str, Any]:
+    sales = defaultdict(float)
+    for r in superstore():
+        sales[r["Sub-Category"]] += float(r["Sales"])
+    top = sorted(sales, key=sales.get, reverse=True)
+    return {"top_subcategories": top[:5], "first_sales": sales[top[0]], "second_sales": sales[top[1]]}
+
+
+def x02() -> dict[str, Any]:
+    sales = defaultdict(float)
+    for r in superstore():
+        sales[(r["Order Date"].split("/")[2], r["Sub-Category"])] += float(r["Sales"])
+    growth = {sub: (sales[("2017", sub)] / sales[("2016", sub)] - 1) * 100
+              for (year, sub) in sales if year == "2016" and sales[("2016", sub)] >= 10_000}
+    best = max(growth, key=growth.get)
+    return {"fastest_subcategory": best, "sales_2016": sales[("2016", best)], "sales_2017": sales[("2017", best)],
+            "growth_pct": growth[best]}
+
+
+def x03() -> dict[str, Any]:
+    data = superstore()
+    discounts = [float(r["Discount"]) for r in data]
+    sales = [float(r["Sales"]) for r in data]
+    weighted = sum(d * s for d, s in zip(discounts, sales)) / sum(sales)
+    return {"mean_discount": statistics.fmean(discounts) * 100, "weighted_discount": weighted * 100}
+
+
+def x04() -> dict[str, Any]:
+    lines = defaultdict(list)
+    for r in superstore():
+        lines[r["Order ID"]].append((float(r["Profit"]), float(r["Sales"])))
+    loss_orders = [rows for rows in lines.values() if any(p < 0 for p, _ in rows)]
+    loss_sales = sum(s for rows in loss_orders for p, s in rows if p < 0)
+    all_sales = sum(s for rows in loss_orders for _, s in rows)
+    return {"orders_with_loss": len(loss_orders), "share_orders_pct": len(loss_orders) / len(lines) * 100,
+            "loss_lines_sales_pct": loss_sales / all_sales * 100}
+
+
+# --------------------------------------------------------- dev_hard: Titanic
+
+def x05() -> dict[str, Any]:
+    names = {"1": "first", "2": "second", "3": "third"}
+    hits, totals = defaultdict(int), defaultdict(int)
+    for r in rows("Titanic-Dataset.csv"):
+        key = f"{names[r['Pclass']]}_{r['Sex']}"
+        totals[key] += 1
+        hits[key] += int(r["Survived"])
+    return {key: rate(hits, totals, key) for key in totals}
+
+
+def x06() -> dict[str, Any]:
+    data = list(rows("Titanic-Dataset.csv"))
+    southampton = [r for r in data if r["Embarked"] == "S"]
+    third = [r for r in southampton if r["Pclass"] == "3"]
+    survivors = sum(int(r["Survived"]) for r in third)
+    return {"third_share_of_s": len(third) / len(southampton) * 100, "survival_third_s": survivors / len(third) * 100,
+            "third_s_survivors_of_all": survivors / len(data) * 100}
+
+
+def x07() -> dict[str, Any]:
+    third = [r for r in rows("Titanic-Dataset.csv") if r["Pclass"] == "3"]
+    known = [r for r in third if r["Age"].strip()]
+    children = [int(r["Survived"]) for r in known if float(r["Age"]) < 18]
+    adults = [int(r["Survived"]) for r in known if float(r["Age"]) >= 18]
+    return {"child_rate": sum(children) / len(children) * 100, "adult_rate": sum(adults) / len(adults) * 100,
+            "missing_age": len(third) - len(known)}
+
+
+# -------------------------------------------------- dev_hard: Online Retail II
+
+def x08() -> dict[str, Any]:
+    unique, _, header = retail_unique_rows()
+    q, p, d = header.index("Quantity"), header.index("Price"), header.index("InvoiceDate")
+    revenue, days = defaultdict(float), defaultdict(set)
+    for r in unique:
+        if r[d].startswith("2010-"):
+            month = int(r[d][5:7])
+            revenue[month] += float(r[q]) * float(r[p])
+            days[month].add(r[d][:10])
+    per_day = {m: revenue[m] / len(days[m]) for m in revenue}
+    lowest = min(per_day, key=per_day.get)
+    return {"lowest_month": MONTHS[lowest - 1], "lowest_per_day": per_day[lowest]}
+
+
+def x09() -> dict[str, Any]:
+    unique, _, header = retail_unique_rows()
+    q, p, d, inv = (header.index(c) for c in ("Quantity", "Price", "InvoiceDate", "Invoice"))
+    gross = lost = 0.0
+    for r in unique:
+        if r[d].startswith("2011-"):
+            value = float(r[q]) * float(r[p])
+            if r[inv].startswith("C"):
+                lost += value
+            else:
+                gross += value
+    return {"gross_2011": gross, "cancelled_2011": abs(lost), "cancelled_share_pct": abs(lost) / gross * 100}
+
+
+def x10() -> dict[str, Any]:
+    unique, _, header = retail_unique_rows()
+    q, p, cid, country = (header.index(c) for c in ("Quantity", "Price", "Customer ID", "Country"))
+    revenue, customers = defaultdict(float), defaultdict(set)
+    for r in unique:
+        if r[cid].strip():
+            revenue[r[country]] += float(r[q]) * float(r[p])
+            customers[r[country]].add(r[cid])
+    average = {c: revenue[c] / len(customers[c]) for c in revenue if len(customers[c]) >= 20}
+    top = sorted(average, key=average.get, reverse=True)[:3]
+    return {"top_countries": top, "top_country_avg": average[top[0]]}
+
+
 CROSSCHECKS: dict[str, Callable[[], dict[str, Any]]] = {
+    "x01": x01, "x02": x02, "x03": x03, "x04": x04, "x05": x05,
+    "x06": x06, "x07": x07, "x08": x08, "x09": x09, "x10": x10,
     "d01": d01, "d02": d02, "d03": d03, "d04": d04, "d05": d05, "d06": d06, "d07": d07, "d08": d08,
     "d09": d09, "d10": d10, "d11": d11, "h01": h01, "h02": h02, "h03": h03, "h04": h04, "h05": h05,
     "f01": f01, "f02": f02, "f03": f03, "f04": f04, "f05": f05,

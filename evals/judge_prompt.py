@@ -40,7 +40,8 @@ example, an earlier estimate or a comparison that it then sets aside is not its 
 A clearly presented result wins even if another sentence contradicts it: extract the \
 result and leave conflicting false. Set conflicting to true only when the answer presents \
 two different values as its result, or none of them as its result; then still report the \
-most prominent value.
+most prominent value. In other_values, list the other values the answer gives for the same \
+thing (for example an unadjusted figure or an earlier estimate), as written; null if none.
 
 mention checks: verdict "yes" if the answer clearly says what the description requires, \
 in any wording; otherwise "no".
@@ -73,6 +74,12 @@ SUBMIT_GRADES_TOOL = {
                             "type": ["array", "null"],
                             "items": {"type": "string"},
                             "description": "ranking checks: items in the order the check asks for.",
+                        },
+                        "other_values": {
+                            "type": ["array", "null"],
+                            "items": {"type": "string"},
+                            "description": "number, label and ranking checks: other values the answer gives "
+                                           "for the same thing, as written.",
                         },
                         "conflicting": {
                             "type": "boolean",

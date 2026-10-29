@@ -245,7 +245,100 @@ def f05_houses_price_per_sqft_zipcodes() -> dict[str, Any]:
     return {"top_zipcodes": [str(z) for z in top.index], "top_zip_median_per_sqft": float(top["median"].iloc[0])}
 
 
+# ------------------------------------------------------ dev_hard: Superstore
+
+def x01_superstore_top_subcategories() -> dict[str, Any]:
+    sales = superstore().groupby("Sub-Category")["Sales"].sum().sort_values(ascending=False)
+    return {"top_subcategories": list(sales.index[:5]), "first_sales": float(sales.iloc[0]),
+            "second_sales": float(sales.iloc[1])}
+
+
+def x02_superstore_fastest_growth() -> dict[str, Any]:
+    data = superstore()
+    by_year = data.groupby([data["Order Date"].dt.year, "Sub-Category"])["Sales"].sum().unstack(0)
+    eligible = by_year[by_year[2016] >= 10_000]
+    growth = (eligible[2017] / eligible[2016] - 1) * 100
+    best = growth.idxmax()
+    return {"fastest_subcategory": best, "sales_2016": float(eligible.loc[best, 2016]),
+            "sales_2017": float(eligible.loc[best, 2017]), "growth_pct": float(growth[best])}
+
+
+def x03_superstore_discounts() -> dict[str, Any]:
+    data = superstore()
+    weighted = (data["Sales"] * data["Discount"]).sum() / data["Sales"].sum()
+    return {"mean_discount": float(data["Discount"].mean() * 100), "weighted_discount": float(weighted * 100)}
+
+
+def x04_superstore_loss_orders() -> dict[str, Any]:
+    data = superstore()
+    has_loss = data.groupby("Order ID")["Profit"].apply(lambda profit: (profit < 0).any())
+    lines = data[data["Order ID"].isin(has_loss[has_loss].index)]
+    return {
+        "orders_with_loss": float(has_loss.sum()),
+        "share_orders_pct": float(has_loss.mean() * 100),
+        "loss_lines_sales_pct": float(lines.loc[lines["Profit"] < 0, "Sales"].sum() / lines["Sales"].sum() * 100),
+    }
+
+
+# --------------------------------------------------------- dev_hard: Titanic
+
+def x05_titanic_class_sex() -> dict[str, Any]:
+    rate = titanic().groupby(["Pclass", "Sex"])["Survived"].mean() * 100
+    names = {1: "first", 2: "second", 3: "third"}
+    return {f"{names[c]}_{s}": float(rate[(c, s)]) for c, s in rate.index}
+
+
+def x06_titanic_southampton() -> dict[str, Any]:
+    data = titanic()
+    southampton = data[data["Embarked"] == "S"]
+    third = southampton[southampton["Pclass"] == 3]
+    return {
+        "third_share_of_s": float(len(third) / len(southampton) * 100),
+        "survival_third_s": float(third["Survived"].mean() * 100),
+        "third_s_survivors_of_all": float(third["Survived"].sum() / len(data) * 100),
+    }
+
+
+def x07_titanic_third_class_age() -> dict[str, Any]:
+    third = titanic()[titanic()["Pclass"] == 3]
+    known = third[third["Age"].notna()]
+    return {
+        "child_rate": float(known.loc[known["Age"] < 18, "Survived"].mean() * 100),
+        "adult_rate": float(known.loc[known["Age"] >= 18, "Survived"].mean() * 100),
+        "missing_age": float(third["Age"].isna().sum()),
+    }
+
+
+# -------------------------------------------------- dev_hard: Online Retail II
+
+def x08_retail_revenue_per_trading_day() -> dict[str, Any]:
+    data = retail().drop_duplicates()
+    year = data[data["InvoiceDate"].dt.year == 2010]
+    months = year.groupby(year["InvoiceDate"].dt.month).agg(
+        revenue=("Revenue", "sum"), days=("InvoiceDate", lambda d: d.dt.normalize().nunique()))
+    per_day = months["revenue"] / months["days"]
+    return {"lowest_month": MONTHS[int(per_day.idxmin()) - 1], "lowest_per_day": float(per_day.min())}
+
+
+def x09_retail_cancelled_share() -> dict[str, Any]:
+    data = retail().drop_duplicates()
+    year = data[data["InvoiceDate"].dt.year == 2011]
+    cancelled = year["Invoice"].astype(str).str.startswith("C")
+    gross = year.loc[~cancelled, "Revenue"].sum()
+    lost = abs(year.loc[cancelled, "Revenue"].sum())
+    return {"gross_2011": float(gross), "cancelled_2011": float(lost), "cancelled_share_pct": float(lost / gross * 100)}
+
+
+def x10_retail_revenue_per_customer() -> dict[str, Any]:
+    data = retail().drop_duplicates()
+    known = data[data["Customer ID"].notna()]
+    by_country = known.groupby("Country").agg(revenue=("Revenue", "sum"), customers=("Customer ID", "nunique"))
+    eligible = by_country[by_country["customers"] >= 20]
+    average = (eligible["revenue"] / eligible["customers"]).sort_values(ascending=False)
+    return {"top_countries": list(average.index[:3]), "top_country_avg": float(average.iloc[0])}
+
+
 REFERENCES: dict[str, Callable[[], dict[str, Any]]] = {
     name: function for name, function in globals().items()
-    if callable(function) and name[:1] in "dhf" and name[1:3].isdigit()
+    if callable(function) and name[:1] in "dhfx" and name[1:3].isdigit()
 }

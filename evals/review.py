@@ -1,12 +1,14 @@
-"""Manual check of the grader: sample graded dev answers, then score the human's verdicts.
+"""Manual check of the grader: review graded answers, then score the human's verdicts.
 
     .venv\\Scripts\\python.exe evals\\review.py --name dev_baseline --sample 10
-        writes evals/results/<name>/review.md; after every check write
+        writes evals/results/<name>/review.md with EVERY answer that has a failed
+        check plus 10 random fully passed answers; after every check write
         "Human: agree" or "Human: disagree <comment>"
     .venv\\Scripts\\python.exe evals\\review.py --name dev_baseline --score
         reads the filled file and reports how often the human agrees with the grader
 
-Only dev answers are sampled: holdout and final are not looked at in detail.
+Only the tuning splits (dev, dev_hard) are reviewed: holdout and final are not
+looked at in detail.
 """
 
 import argparse
@@ -20,7 +22,7 @@ from typing import Any
 EVALS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(EVALS_DIR))
 
-from report import QUESTIONS_FILE, load_run  # noqa: E402
+from report import QUESTIONS_FILE, TUNING_SPLITS, load_run  # noqa: E402
 from run_evals import RESULTS_DIR  # noqa: E402
 
 CHECK_HEADER = re.compile(r"^### Check (\S+)")
@@ -42,7 +44,9 @@ def render_review(name: str, rows: list[dict[str, Any]]) -> str:
         "",
     ]
     for number, row in enumerate(rows, start=1):
-        lines += [f"## {number}. {row['id']} r{row['repeat']} ({row['category']})", "",
+        failed = not row["grade"]["strict_pass"]
+        lines += [f"## {number}. {row['id']} r{row['repeat']} ({row['category']})"
+                  + (" - HAS FAILED CHECKS" if failed else " - random passed answer"), "",
                   f"**Question:** {row['question']}", "", "**Agent's answer:**", "",
                   quoted(row["record"].get("final_answer")), ""]
         for check in row["grade"]["checks"]:
@@ -52,6 +56,7 @@ def render_review(name: str, rows: list[dict[str, Any]]) -> str:
                 f"- Check: {check['description']}",
                 f"- Expected: {check['expected'] if check['expected'] is not None else '-'}",
                 f"- Extracted by the judge: {check['extracted']}",
+                *other_values_lines(check),
                 f"- Judge's quote: {check['quote']!r}",
                 f"- Grader: {'PASS' if check['passed'] else 'FAIL'}",
                 "",
@@ -59,6 +64,25 @@ def render_review(name: str, rows: list[dict[str, Any]]) -> str:
                 "",
             ]
     return "\n".join(lines)
+
+
+def other_values_lines(check: dict[str, Any]) -> list[str]:
+    """Marks other values the answer gives for the same thing, and a flagged contradiction."""
+    lines = []
+    if check.get("other_values"):
+        lines.append(f"- **Other values for the same thing in the answer:** {', '.join(map(str, check['other_values']))}")
+    if check.get("conflicting"):
+        lines.append("- **The judge found the answer contradicts itself on this value.**")
+    return lines
+
+
+def select_answers(rows: list[dict[str, Any]], sample: int, seed: int) -> list[dict[str, Any]]:
+    """Every graded tuning-split answer with a failed check, plus `sample` random fully passed ones."""
+    graded = [r for r in rows if r["grade"] and r["split"] in TUNING_SPLITS]
+    failed = sorted((r for r in graded if not r["grade"]["strict_pass"]), key=lambda r: (r["id"], r["repeat"]))
+    passed = [r for r in graded if r["grade"]["strict_pass"]]
+    picked = random.Random(seed).sample(passed, min(sample, len(passed)))
+    return failed + sorted(picked, key=lambda r: (r["id"], r["repeat"]))
 
 
 def score_review(text: str) -> dict[str, Any]:
@@ -91,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--name", required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--sample", type=int, help="Number of graded dev answers to put into review.md")
+    mode.add_argument("--sample", type=int,
+                      help="Number of random fully passed answers to add to every answer with a failed check")
     mode.add_argument("--score", action="store_true", help="Score the filled review.md")
     parser.add_argument("--seed", type=int, default=0, help="Random seed for the sample")
     parser.add_argument("--results-dir", default=str(RESULTS_DIR), help=argparse.SUPPRESS)
@@ -117,18 +142,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     questions = {q["id"]: q for q in json.loads(QUESTIONS_FILE.read_text(encoding="utf-8"))}
-    graded = [r for r in load_run(Path(args.results_dir) / args.name, questions) if r["grade"] and r["split"] == "dev"]
-    if not graded:
-        print("No graded dev answers in this run.")
+    sample = select_answers(load_run(Path(args.results_dir) / args.name, questions), args.sample, args.seed)
+    if not sample:
+        print("No graded dev or dev_hard answers in this run.")
         return 2
-    sample = random.Random(args.seed).sample(graded, min(args.sample, len(graded)))
-    sample.sort(key=lambda r: (r["id"], r["repeat"]))
     if path.exists():
         print(f"{path} exists; delete it to make a new sample (it may contain your verdicts).")
         return 2
     path.write_text(render_review(args.name, sample), encoding="utf-8")
     checks = sum(len(r["grade"]["checks"]) for r in sample)
-    print(f"Wrote {path}: {len(sample)} answers, {checks} checks to review.")
+    failed = sum(not r["grade"]["strict_pass"] for r in sample)
+    print(f"Wrote {path}: {len(sample)} answers ({failed} with failed checks, {len(sample) - failed} random passed), "
+          f"{checks} checks to review.")
     return 0
 
 

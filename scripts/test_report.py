@@ -137,17 +137,24 @@ def main() -> int:
         check("i) compare table", code == 0 and "| Strict pass rate | 71.4% (5/7" in out.getvalue()
               and (root / "compare_dev_run_vs_holdout_run.md").exists(), out.getvalue().splitlines()[2])
 
-        # j) review: only dev answers are sampled, and the human's verdicts are scored
+        # j) review: every failed answer plus random passed ones, only tuning splits; verdicts are scored
         with redirect_stdout(io.StringIO()):
-            review.main(["--name", "dev_run", "--sample", "3", "--results-dir", str(root)])
+            review.main(["--name", "dev_run", "--sample", "2", "--results-dir", str(root)])
             no_dev = review.main(["--name", "holdout_run", "--sample", "3", "--results-dir", str(root)])
         text = (root / "dev_run" / "review.md").read_text(encoding="utf-8")
         filled = text.replace("Human: ", "Human: agree", 4).replace("Human: \n", "Human: disagree the quote is wrong\n", 1)
         result = review.score_review(filled)
-        check("j) review sample and score",
-              no_dev == 2 and text.count("### Check") == 6 and result["filled"] == 5 and result["agree"] == 4
+        check("j) review: all failed answers + random passed, and scoring",
+              no_dev == 2 and text.count("HAS FAILED CHECKS") == 2 and text.count("random passed answer") == 2
+              and "d02 r2" in text and "d03 r1" in text and text.count("### Check") == 8
+              and result["filled"] == 5 and result["agree"] == 4
               and "the quote is wrong" in result["disagree"][0] and abs(result["agreement"] - 0.8) < 1e-9,
-              f"6 checks sampled; agreement {result['agree']}/{result['filled']}; {result['disagree']}")
+              f"2 failed + 2 passed answers, 8 checks; agreement {result['agree']}/{result['filled']}")
+
+        # k) other values for the same thing and a flagged contradiction are marked
+        marked = review.other_values_lines({"other_values": ["1011.1"], "conflicting": True})
+        check("k) other values marked", len(marked) == 2 and "1011.1" in marked[0] and "contradicts" in marked[1]
+              and review.other_values_lines({"other_values": None}) == [], " | ".join(marked))
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

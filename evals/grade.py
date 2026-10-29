@@ -40,7 +40,8 @@ from run_evals import result_files  # noqa: E402
 
 RESULTS_DIR = EVALS_DIR / "results"
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
-DEFAULT_JUDGE_MODEL = "claude-sonnet-5-5"
+# Haiku 5.5 graded every case of test_grader_cases.py correctly (64/64) at about 1/14 of the Sonnet cost.
+DEFAULT_JUDGE_MODEL = "claude-haiku-5-5"
 # A rounded number ("74%", "$118K") passes if rounding the expected value could give
 # it, but the rounding allowance is capped at 1% of the expected value, so a coarse
 # number ("$1M" for 836,154) cannot pass. Counts with abs_tol 0 must be exact.
@@ -227,6 +228,7 @@ def grade_answer(client: Any, model: str, question: dict[str, Any], answer: str 
             "quote": grade.get("quote") if grade else None,
             "expected": expected_of(check),
             "conflicting": bool(grade.get("conflicting")) if grade else False,
+            "other_values": grade.get("other_values") if grade else None,
             "explanation": f"{reason}; judge: {grade.get('explanation', '')}" if grade else reason,
         })
     passed_count = sum(r["passed"] for r in results)
