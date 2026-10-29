@@ -95,6 +95,10 @@ def main() -> int:
            and not g.compare(label, {"label": "West"})[0] and not g.compare(label, {"label": None})[0]
            and g.compare({**label, "value": "November"}, {"label": "Nov"})[0],
            "'central', 'CENTRAL region', 'Nov' pass; 'West' and null fail")
+    accepted = {"type": "label", "description": "Top country", "value": ["EIRE", "Netherlands"]}
+    report("s2b) label with several accepted values",
+           g.compare(accepted, {"label": "Netherlands"})[0] and g.compare(accepted, {"label": "eire"})[0]
+           and not g.compare(accepted, {"label": "Singapore"})[0], "EIRE or Netherlands pass, Singapore fails")
 
     # conflicting: number, label and ranking fail; mention and not_claim are not affected
     conflict_number = g.compare(number(74.2038), {"value": 74.2, "precision": 0.1, "conflicting": True})

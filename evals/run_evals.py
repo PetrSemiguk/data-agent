@@ -59,7 +59,7 @@ FILE_BROWSERS = {"listdir", "scandir", "walk", "glob", "iglob", "rglob", "iterdi
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the agent on the eval questions.")
-    parser.add_argument("--split", required=True, choices=["dev", "dev_hard", "holdout", "final"])
+    parser.add_argument("--split", required=True, choices=["dev", "dev_hard", "dev_open", "holdout", "final"])
     parser.add_argument(FINAL_FLAG, dest="final_confirmed", action="store_true",
                         help="Required for --split final: the final split is run once, at the very end")
     parser.add_argument("--ids", help="Comma-separated question ids, e.g. d01,d06 (default: the whole split)")

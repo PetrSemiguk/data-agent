@@ -16,7 +16,7 @@ sys.path.insert(0, str(EVALS_DIR))
 from reference import DATA_DIR, REFERENCES  # noqa: E402
 
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
-SPLITS = {"dev", "dev_hard", "holdout", "final"}
+SPLITS = {"dev", "dev_hard", "dev_open", "holdout", "final"}
 CATEGORIES = {"lookup", "aggregation", "time_series", "group_comparison", "data_quality_trap", "multi_step"}
 CHECK_TYPES = {"number", "label", "ranking", "mention", "not_claim"}
 ORDERS = {"descending", "ascending"}
@@ -64,7 +64,9 @@ def fill(question: dict[str, Any]) -> dict[str, Any]:
         if check["type"] == "number":
             check["value"] = round(float(values[key]), 6)
         elif check["type"] == "label":
-            check["value"] = str(values[key])
+            # A list holds every accepted answer (one per reasonable reading of the question).
+            value = values[key]
+            check["value"] = [str(v) for v in value] if isinstance(value, list) else str(value)
         else:
             check["items"] = list(values[key])[: check["top_k"]]
     return values
@@ -101,7 +103,7 @@ def main() -> int:
         print(f"{question['id']:4} {question['split']:8} {question['category']:18} {text}")
 
     QUESTIONS_FILE.write_text(json.dumps(questions, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    counts = {split: sum(q["split"] == split for q in questions) for split in ("dev", "dev_hard", "holdout", "final")}
+    counts = {split: sum(q["split"] == split for q in questions) for split in ("dev", "dev_hard", "dev_open", "holdout", "final")}
     print(f"\nWrote {QUESTIONS_FILE.name}: {len(questions)} questions {counts}")
     return 0
 

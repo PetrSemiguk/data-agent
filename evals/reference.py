@@ -338,7 +338,63 @@ def x10_retail_revenue_per_customer() -> dict[str, Any]:
     return {"top_countries": list(average.index[:3]), "top_country_avg": float(average.iloc[0])}
 
 
+# --------------------------------------------- dev_open: questions without hints
+
+def o01_retail_top_country() -> dict[str, Any]:
+    data = retail().drop_duplicates()
+    known = data[data["Customer ID"].notna()]
+    by_country = known.groupby("Country").agg(revenue=("Revenue", "sum"), customers=("Customer ID", "nunique"))
+    average = by_country["revenue"] / by_country["customers"]
+    accepted = [average.idxmax(), average[by_country["customers"] >= 10].idxmax()]
+    return {"top_country": list(dict.fromkeys(accepted))}
+
+
+def o02_retail_december() -> dict[str, Any]:
+    data = retail()
+    december = data[(data["InvoiceDate"].dt.year == 2011) & (data["InvoiceDate"].dt.month == 12)]
+    return {"last_day": float(december["InvoiceDate"].dt.day.max())}
+
+
+def o03_retail_orders_2011() -> dict[str, Any]:
+    invoices = retail().loc[lambda d: d["InvoiceDate"].dt.year == 2011, "Invoice"].astype(str)
+    return {"orders_2011": float(invoices[~invoices.str.startswith("C")].nunique())}
+
+
+def o04_superstore_typical_order() -> dict[str, Any]:
+    return {"median_order_value": float(superstore().groupby("Order ID")["Sales"].sum().median())}
+
+
+def o05_titanic_children() -> dict[str, Any]:
+    data = titanic()
+    known = data[data["Age"].notna()]
+    higher = known.loc[known["Age"] < 18, "Survived"].mean() > known.loc[known["Age"] >= 18, "Survived"].mean()
+    return {"children_higher": "yes" if higher else "no", "missing_age": float(data["Age"].isna().sum())}
+
+
+def o06_retail_top_products() -> dict[str, Any]:
+    data = retail().drop_duplicates()
+    # Product codes start with a digit; postage, manual lines, fees and adjustments do not.
+    products = data[data["StockCode"].astype(str).str[0].str.isdigit()]
+    revenue = products.groupby("StockCode")["Revenue"].sum().sort_values(ascending=False)
+    names = products.groupby("StockCode")["Description"].first().str.strip()
+    return {"top_products": [names[code] for code in revenue.index[:3]]}
+
+
+def o07_superstore_top_state() -> dict[str, Any]:
+    data = superstore()
+    by_state = data.groupby("State").agg(profit=("Profit", "sum"), sales=("Sales", "sum"), orders=("Order ID", "nunique"))
+    margin = by_state["profit"] / by_state["sales"]
+    accepted = [margin.idxmax()] + [margin[by_state["orders"] >= minimum].idxmax() for minimum in (20, 50, 100)]
+    return {"top_state": list(dict.fromkeys(accepted))}
+
+
+def o08_titanic_family_size() -> dict[str, Any]:
+    data = titanic()
+    alone = data[data["SibSp"] + data["Parch"] == 0]
+    return {"alone_rate": float(alone["Survived"].mean() * 100)}
+
+
 REFERENCES: dict[str, Callable[[], dict[str, Any]]] = {
     name: function for name, function in globals().items()
-    if callable(function) and name[:1] in "dhfx" and name[1:3].isdigit()
+    if callable(function) and name[:1] in "dhfxo" and name[1:3].isdigit()
 }

@@ -361,7 +361,80 @@ def x10() -> dict[str, Any]:
     return {"top_countries": top, "top_country_avg": average[top[0]]}
 
 
+# --------------------------------------------- dev_open: questions without hints
+
+def o01() -> dict[str, Any]:
+    unique, _, header = retail_unique_rows()
+    q, p, cid, country = (header.index(c) for c in ("Quantity", "Price", "Customer ID", "Country"))
+    revenue, customers = defaultdict(float), defaultdict(set)
+    for r in unique:
+        if r[cid].strip():
+            revenue[r[country]] += float(r[q]) * float(r[p])
+            customers[r[country]].add(r[cid])
+    average = {c: revenue[c] / len(customers[c]) for c in revenue}
+    top_any = max(average, key=average.get)
+    top_10 = max((c for c in average if len(customers[c]) >= 10), key=average.get)
+    return {"top_country": list(dict.fromkeys([top_any, top_10]))}
+
+
+def o02() -> dict[str, Any]:
+    days = [int(r["InvoiceDate"][8:10]) for r in rows("online_retail_II.csv") if r["InvoiceDate"].startswith("2011-12")]
+    return {"last_day": max(days)}
+
+
+def o03() -> dict[str, Any]:
+    invoices = {r["Invoice"] for r in rows("online_retail_II.csv")
+                if r["InvoiceDate"].startswith("2011-") and not r["Invoice"].startswith("C")}
+    return {"orders_2011": len(invoices)}
+
+
+def o04() -> dict[str, Any]:
+    totals = defaultdict(float)
+    for r in superstore():
+        totals[r["Order ID"]] += float(r["Sales"])
+    return {"median_order_value": statistics.median(totals.values())}
+
+
+def o05() -> dict[str, Any]:
+    data = list(rows("Titanic-Dataset.csv"))
+    known = [(float(r["Age"]), int(r["Survived"])) for r in data if r["Age"].strip()]
+    children = [s for age, s in known if age < 18]
+    adults = [s for age, s in known if age >= 18]
+    higher = sum(children) / len(children) > sum(adults) / len(adults)
+    return {"children_higher": "yes" if higher else "no", "missing_age": len(data) - len(known)}
+
+
+def o06() -> dict[str, Any]:
+    unique, _, header = retail_unique_rows()
+    q, p, code, desc = (header.index(c) for c in ("Quantity", "Price", "StockCode", "Description"))
+    revenue, names = defaultdict(float), {}
+    for r in unique:
+        if r[code][:1].isdigit():
+            revenue[r[code]] += float(r[q]) * float(r[p])
+            names.setdefault(r[code], r[desc].strip())
+    top = sorted(revenue, key=revenue.get, reverse=True)[:3]
+    return {"top_products": [names[c] for c in top]}
+
+
+def o07() -> dict[str, Any]:
+    profit, sales, orders = defaultdict(float), defaultdict(float), defaultdict(set)
+    for r in superstore():
+        profit[r["State"]] += float(r["Profit"])
+        sales[r["State"]] += float(r["Sales"])
+        orders[r["State"]].add(r["Order ID"])
+    margin = {s: profit[s] / sales[s] for s in sales}
+    accepted = [max(margin, key=margin.get)]
+    accepted += [max((s for s in margin if len(orders[s]) >= minimum), key=margin.get) for minimum in (20, 50, 100)]
+    return {"top_state": list(dict.fromkeys(accepted))}
+
+
+def o08() -> dict[str, Any]:
+    alone = [int(r["Survived"]) for r in rows("Titanic-Dataset.csv") if int(r["SibSp"]) + int(r["Parch"]) == 0]
+    return {"alone_rate": sum(alone) / len(alone) * 100}
+
+
 CROSSCHECKS: dict[str, Callable[[], dict[str, Any]]] = {
+    "o01": o01, "o02": o02, "o03": o03, "o04": o04, "o05": o05, "o06": o06, "o07": o07, "o08": o08,
     "x01": x01, "x02": x02, "x03": x03, "x04": x04, "x05": x05,
     "x06": x06, "x07": x07, "x08": x08, "x09": x09, "x10": x10,
     "d01": d01, "d02": d02, "d03": d03, "d04": d04, "d05": d05, "d06": d06, "d07": d07, "d08": d08,

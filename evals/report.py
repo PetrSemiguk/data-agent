@@ -5,8 +5,8 @@ Run from the project root:
     .venv\\Scripts\\python.exe evals\\report.py --compare dev_baseline dev_no_skills
 
 Writes evals/results/<name>/report.md and prints a short summary. The Failures
-section shows expected values and quotes only for the tuning splits (dev and
-dev_hard): holdout and final failures list only the question id, category and
+section shows expected values and quotes only for the tuning splits (dev,
+dev_hard, dev_open): holdout and final failures list only the question id, category and
 check type, so the agent is never tuned on them.
 """
 
@@ -25,9 +25,9 @@ sys.path.insert(0, str(EVALS_DIR))
 from run_evals import RESULTS_DIR, result_files  # noqa: E402
 
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
-SPLITS = ("dev", "dev_hard", "holdout", "final")
+SPLITS = ("dev", "dev_hard", "dev_open", "holdout", "final")
 # Splits whose failures may be looked at in detail (the agent may be tuned on them).
-TUNING_SPLITS = ("dev", "dev_hard")
+TUNING_SPLITS = ("dev", "dev_hard", "dev_open")
 
 
 # ------------------------------------------------------------------- loading

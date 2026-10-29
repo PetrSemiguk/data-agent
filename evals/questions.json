@@ -1041,5 +1041,265 @@
       }
     ],
     "reference": "x10_retail_revenue_per_customer"
+  },
+  {
+    "id": "o01",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_open",
+    "question": "Customers from which country spend the most on average?",
+    "category": "aggregation",
+    "traps": [
+      "The top countries by average spend per customer have very few customers"
+    ],
+    "checks": [
+      {
+        "type": "label",
+        "key": "top_country",
+        "description": "Country named as having the highest average spend per customer",
+        "value": [
+          "EIRE",
+          "Netherlands"
+        ]
+      },
+      {
+        "type": "mention",
+        "description": "States how many customers the named top country has, or says it applied a minimum number of customers per country"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not name a country with a single customer as the country whose customers spend the most"
+      }
+    ],
+    "reference": "o01_retail_top_country",
+    "notes": "Accepted: the top country with no size threshold, and the top country among countries with at least 10 customers."
+  },
+  {
+    "id": "o02",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_open",
+    "question": "Was December 2011 a weak month compared with December 2010?",
+    "category": "time_series",
+    "traps": [
+      "The data ends on 9 December 2011, so December 2011 is incomplete",
+      "The first days of December 2010 are duplicated rows; without removing them, December 2010 looks much bigger"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "last_day",
+        "description": "The last day of December 2011 that has data, as a day of the month",
+        "value": 9.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "Says that December 2011 is incomplete because the data ends partway through the month"
+      },
+      {
+        "type": "mention",
+        "description": "Says that the data contains exact duplicate rows and that they were removed before comparing"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not conclude that December 2011 had lower sales than December 2010"
+      }
+    ],
+    "reference": "o02_retail_december",
+    "notes": "With duplicates removed, December 2011 is higher than December 2010 over the same days and per trading day, for net and gross sales alike, so 'not weaker' holds for every reasonable reading."
+  },
+  {
+    "id": "o03",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_open",
+    "question": "How many orders were placed in 2011?",
+    "category": "data_quality_trap",
+    "traps": [
+      "Invoices starting with 'C' are cancellations, not orders",
+      "The 2011 data ends on 9 December"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "orders_2011",
+        "description": "Number of distinct invoices in 2011 that are not cancellations",
+        "value": 20365.0,
+        "abs_tol": 3
+      },
+      {
+        "type": "mention",
+        "description": "Says that cancellation invoices (starting with 'C') were excluded or counted separately"
+      },
+      {
+        "type": "mention",
+        "description": "Says that the 2011 data ends on 9 December"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not give the count that includes cancellation invoices as the number of orders"
+      }
+    ],
+    "reference": "o03_retail_orders_2011",
+    "notes": "abs_tol 3 covers also excluding the 3 bad-debt adjustment invoices (starting with 'A')."
+  },
+  {
+    "id": "o04",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_open",
+    "question": "What does a typical order look like in terms of value?",
+    "category": "aggregation",
+    "traps": [
+      "Order values are strongly skewed; the median describes a typical order better than the mean",
+      "An order has several lines; the value of an order is the sum of its lines"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "median_order_value",
+        "description": "Median total sales per order (Order ID)",
+        "value": 151.96,
+        "rel_tol": 0.01
+      },
+      {
+        "type": "mention",
+        "description": "Says that order values are skewed: the mean is well above the median"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not present the mean order value as the typical order without mentioning the skew"
+      }
+    ],
+    "reference": "o04_superstore_typical_order"
+  },
+  {
+    "id": "o05",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev_open",
+    "question": "Did children have a better chance of surviving than adults?",
+    "category": "group_comparison",
+    "traps": [
+      "Age is missing for many passengers; they cannot be counted as children or adults"
+    ],
+    "checks": [
+      {
+        "type": "label",
+        "key": "children_higher",
+        "description": "Whether children survived at a higher rate than adults (yes or no)",
+        "value": "yes"
+      },
+      {
+        "type": "number",
+        "key": "missing_age",
+        "description": "Number of passengers with no recorded age",
+        "value": 177.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "Says that passengers with a missing age were left out of the comparison"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not count passengers with a missing age as adults or as children"
+      }
+    ],
+    "reference": "o05_titanic_children",
+    "notes": "Children survive at a higher rate for every common age cutoff (under 13, 16 or 18), so 'yes' holds for each."
+  },
+  {
+    "id": "o06",
+    "dataset": "online_retail_II.csv",
+    "split": "dev_open",
+    "question": "What are our top 3 products by revenue?",
+    "category": "data_quality_trap",
+    "traps": [
+      "Postage, manual adjustments and fees are among the largest lines but are not products"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "top_products",
+        "description": "Products by revenue, highest first (by product description)",
+        "items": [
+          "REGENCY CAKESTAND 3 TIER",
+          "WHITE HANGING HEART T-LIGHT HOLDER",
+          "JUMBO BAG RED WHITE SPOTTY"
+        ],
+        "top_k": 3,
+        "order": "descending"
+      },
+      {
+        "type": "mention",
+        "description": "Says that non-product lines such as postage or manual adjustments were excluded or are not products"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not list postage, a fee or a manual adjustment as one of the top products"
+      }
+    ],
+    "reference": "o06_retail_top_products",
+    "notes": "The top 3 real products are the same for net and gross revenue, with or without duplicates."
+  },
+  {
+    "id": "o07",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev_open",
+    "question": "Which state is the most profitable relative to its sales?",
+    "category": "aggregation",
+    "traps": [
+      "The states with the highest profit margin have only a handful of orders"
+    ],
+    "checks": [
+      {
+        "type": "label",
+        "key": "top_state",
+        "description": "State named as the most profitable relative to its sales",
+        "value": [
+          "District of Columbia",
+          "Delaware",
+          "Indiana",
+          "Michigan"
+        ]
+      },
+      {
+        "type": "mention",
+        "description": "States the number of orders (or the sales) of the named top state, or says it applied a minimum size"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not name a state with fewer than 10 orders as the most profitable without mentioning how few orders it has"
+      }
+    ],
+    "reference": "o07_superstore_top_state",
+    "notes": "Accepted: the top state by profit / sales with no minimum, and with a minimum of 20, 50 or 100 orders."
+  },
+  {
+    "id": "o08",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev_open",
+    "question": "Does family size affect the chance of survival?",
+    "category": "group_comparison",
+    "traps": [
+      "The largest family sizes have very few passengers",
+      "Survival is not monotonic in family size"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "alone_rate",
+        "description": "Survival rate of passengers travelling alone (family size 1), in percent",
+        "value": 30.353818,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "mention",
+        "description": "Says that the largest family sizes include only a few passengers"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not claim that survival falls steadily as family size grows"
+      }
+    ],
+    "reference": "o08_titanic_family_size",
+    "notes": "Family size = SibSp + Parch + 1; travelling alone means family size 1, so the rate does not depend on binning."
   }
 ]

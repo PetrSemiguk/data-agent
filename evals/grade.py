@@ -111,12 +111,17 @@ def compare_ranking(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool,
 
 
 def compare_label(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool, str]:
-    """Pass if the named answer is the expected one (case and abbreviations as in rankings)."""
+    """Pass if the named answer is the expected one (case and abbreviations as in rankings).
+
+    The expected value may be a list: every reasonable reading of the question
+    has its own correct answer, and any of them passes.
+    """
     stated = grade.get("label")
     if not stated:
         return False, "the answer names no value for this"
-    ok = same_item(str(check["value"]), str(stated))
-    return ok, "same value" if ok else "a different value"
+    accepted = check["value"] if isinstance(check["value"], list) else [check["value"]]
+    ok = any(same_item(str(value), str(stated)) for value in accepted)
+    return ok, "an accepted value" if ok else "a different value"
 
 
 def compare(check: dict[str, Any], grade: dict[str, Any] | None) -> tuple[bool, str]:

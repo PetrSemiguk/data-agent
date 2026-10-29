@@ -7,7 +7,7 @@
     .venv\\Scripts\\python.exe evals\\review.py --name dev_baseline --score
         reads the filled file and reports how often the human agrees with the grader
 
-Only the tuning splits (dev, dev_hard) are reviewed: holdout and final are not
+Only the tuning splits (dev, dev_hard, dev_open) are reviewed: holdout and final are not
 looked at in detail.
 """
 
