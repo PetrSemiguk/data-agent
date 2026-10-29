@@ -426,7 +426,9 @@ def o07() -> dict[str, Any]:
     margin = {s: profit[s] / sales[s] for s in sales}
     accepted = [max(margin, key=margin.get)]
     accepted += [max((s for s in margin if len(orders[s]) >= minimum), key=margin.get) for minimum in (20, 50, 100)]
-    return {"top_state": list(dict.fromkeys(accepted))}
+    accepted = list(dict.fromkeys(accepted))
+    aliases = {"District of Columbia": ["Washington, D.C.", "Washington DC"]}
+    return {"top_state": accepted + [a for s in accepted for a in aliases.get(s, [])]}
 
 
 def o08() -> dict[str, Any]:

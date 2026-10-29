@@ -48,11 +48,15 @@ tolerance wide enough for every reasonable reading, explained in `notes`.
 
 - `dev` (Superstore, Titanic, Online Retail II): for debugging prompts, tools and
   skills. Look at failures freely.
+- `dev_hard` and `dev_open` (the same datasets): harder dev questions; `dev_open` names no
+  trap in the question text. Looked at like dev.
 - `holdout` (IBM HR Attrition, Daily Climate): datasets never used while developing.
   Report only the overall numbers; do not tune the agent on individual questions.
 - `final` (Heart Failure, King County House Sales): the exam. Run the agent on it
   once, at the very end, after all changes. Do not look at its expected values
   before that; the scripts hide them unless `--show-final` is given.
+  **Used on 2026-10-29** (run `final_exam`, default configuration). The final split is
+  spent: further tuning cannot be checked on it; a new final set is needed for that.
 
 ## Recompute the expected values
 

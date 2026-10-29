@@ -34,6 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
 
+from agent.config import SKILLS_DEFAULT, VERIFIER_MODEL  # noqa: E402
 from agent.loop import RunResult, create_client, run_agent  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.skills_loader import load_skills  # noqa: E402
@@ -65,7 +66,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ids", help="Comma-separated question ids, e.g. d01,d06 (default: the whole split)")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--name", default=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    parser.add_argument("--no-skills", action="store_true")
+    parser.add_argument("--skills", action="store_true", help="Offer skills to the agent (off by default)")
+    parser.add_argument("--no-skills", action="store_true", help="Turn skills off (the default; kept for old commands)")
     parser.add_argument("--no-verify", action="store_true")
     parser.add_argument("--verifier-model", default=None, help="Model of the verifier (default: the agent's model)")
     parser.add_argument("--no-cache", action="store_true")
@@ -91,8 +93,8 @@ def config_of(args: argparse.Namespace) -> dict[str, Any]:
     """The settings that change the results; a resumed run must use the same ones."""
     return {
         "model": MODEL,
-        "verifier_model": None if args.no_verify else (args.verifier_model or MODEL),
-        "skills": not args.no_skills,
+        "verifier_model": None if args.no_verify else (args.verifier_model or VERIFIER_MODEL),
+        "skills": use_skills(args),
         "verify": not args.no_verify,
         "cache": not args.no_cache,
         "memory": False,
@@ -103,6 +105,11 @@ def config_of(args: argparse.Namespace) -> dict[str, Any]:
 def result_files(run_dir: Path) -> list[Path]:
     """The <id>__r<k>.json files of a run, without the .grade.json files next to them."""
     return sorted(p for p in run_dir.glob("*__r*.json") if not p.name.endswith(".grade.json"))
+
+
+def use_skills(args: argparse.Namespace) -> bool:
+    """Skills follow SKILLS_DEFAULT; --skills turns them on, --no-skills off."""
+    return (SKILLS_DEFAULT or args.skills) and not args.no_skills
 
 
 def git_commit() -> str:
@@ -307,7 +314,7 @@ def main(
 
     load_dotenv(PROJECT_ROOT / ".env")
     client = client or create_client()
-    skills = None if args.no_skills else load_skills()[0]
+    skills = load_skills()[0] if use_skills(args) else None
     # A run with an unknown cost (no prices for its model) cannot count towards the limit.
     spent = sum(
         json.loads((out_dir / f"{i}__r{r}.json").read_text(encoding="utf-8"))["cost"]["total"] or 0.0 for i, r in done

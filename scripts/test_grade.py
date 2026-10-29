@@ -116,6 +116,23 @@ def main() -> int:
            and g.compare({"type": "mention", "description": "x"}, {"verdict": "yes", "conflicting": True})[0],
            conflict_number[1])
 
+    # Several stated values, all acceptable: the check passes; one unacceptable: it fails
+    two_labels = {"type": "label", "description": "Top country", "value": ["EIRE", "Netherlands"]}
+    numbers = number(3.1022, "Growth in percent", abs_tol=2.5)
+    report("s3b) conflicting but every value acceptable",
+           g.compare(two_labels, {"label": "EIRE", "other_values": ["Netherlands"], "conflicting": True})[0]
+           and not g.compare(two_labels, {"label": "EIRE", "other_values": ["Singapore"], "conflicting": True})[0]
+           and g.compare(numbers, {"value": 3.1, "precision": 0.1, "other_values": ["+5.2% per day"], "conflicting": True})[0]
+           and not g.compare(numbers, {"value": 3.1, "precision": 0.1, "other_values": ["-1.1%"], "conflicting": True})[0]
+           and not g.compare(numbers, {"value": 3.1, "precision": 0.1, "other_values": ["a small rise"], "conflicting": True})[0]
+           and g.compare(ranking, {"items": ["November", "September", "December"], "other_values": ["Nov > Sep > Dec"],
+                                   "conflicting": True})[0],
+           "EIRE+Netherlands pass, EIRE+Singapore fail; 3.1 and 5.2 pass, 3.1 and -1.1 fail; unreadable fails")
+    report("s3c) numbers as written are parsed",
+           [g.parse_number(t) for t in ["$118.4K", "8.98 million", "-1.1%", "£9,079,584", "about 3"]]
+           == [118400.0, 8980000.0, -1.1, 9079584.0, 3.0] and g.parse_number("none") is None,
+           "$118.4K, 8.98 million, -1.1%, £9,079,584, about 3")
+
     # The judge sees the ranking direction and the label type in the request
     from judge_prompt import judge_request  # noqa: E402
     request = judge_request("Q?", "A.", [

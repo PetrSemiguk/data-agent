@@ -39,6 +39,7 @@ from agent.events import (
     VerifierEvent,
 )
 from agent.loop import HistoryTurn, RunResult, action_record, create_client, resume_agent, run_agent
+from agent.config import SKILLS_DEFAULT
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint
 from agent.sandbox import Sandbox
 from agent.skills_loader import Skill, load_skills
@@ -576,7 +577,7 @@ with st.sidebar:
     )
     use_skills = st.toggle(
         "Use skills",
-        value=True,
+        value=SKILLS_DEFAULT,
         help="Offer the agent methodology guides (skills) it can load for the question.",
     )
     skills, skill_warnings = get_skills()

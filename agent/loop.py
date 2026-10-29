@@ -24,6 +24,7 @@ from agent.config import (
     MAX_TOTAL_TOKENS,
     OUTPUTS_DIR,
     PROMPT_CACHE,
+    VERIFIER_MODEL,
     VERIFY_ANSWERS,
 )
 from agent.events import (
@@ -345,7 +346,7 @@ def run_agent(
         tools=[*TOOLS, *([LOAD_SKILL_TOOL] if skills else []), *([REMEMBER_TOOL] if memory else [])],
         skills=skills or None,
         cache=PROMPT_CACHE if cache is None else cache,
-        verifier_model=verifier_model,
+        verifier_model=verifier_model or VERIFIER_MODEL,
         memory=memory,
         memory_note_ids=[note.id for note in notes],
     )

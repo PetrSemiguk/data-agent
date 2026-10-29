@@ -48,6 +48,11 @@ FINGERPRINT_SAMPLE_ROWS = 100  # first and last rows hashed into the dataset fin
 # Skills: methodology guides the agent can load
 SKILLS_DIR = "skills"
 
+# Defaults chosen from the evals (evals/RESULTS.md): skills off (no accuracy gain, ~40% more cost), Sonnet verifier, Haiku judge.
+SKILLS_DEFAULT = False
+VERIFIER_MODEL = "claude-sonnet-5-5"
+JUDGE_MODEL = "claude-haiku-5-5"
+
 # Prompt caching: tools, system prompt and the conversation so far are read
 # from the cache on later steps instead of being processed again.
 PROMPT_CACHE = True

@@ -396,7 +396,15 @@ def o07_superstore_top_state() -> dict[str, Any]:
     by_state = data.groupby("State").agg(profit=("Profit", "sum"), sales=("Sales", "sum"), orders=("Order ID", "nunique"))
     margin = by_state["profit"] / by_state["sales"]
     accepted = [margin.idxmax()] + [margin[by_state["orders"] >= minimum].idxmax() for minimum in (20, 50, 100)]
-    return {"top_state": list(dict.fromkeys(accepted))}
+    return {"top_state": with_aliases(list(dict.fromkeys(accepted)))}
+
+
+STATE_ALIASES = {"District of Columbia": ["Washington, D.C.", "Washington DC"]}
+
+
+def with_aliases(names: list[str]) -> list[str]:
+    """Accepted names plus the common other spellings of the same state."""
+    return [*names, *(alias for name in names for alias in STATE_ALIASES.get(name, []))]
 
 
 def o08_titanic_family_size() -> dict[str, Any]:

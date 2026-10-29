@@ -22,6 +22,7 @@ rejected on Sonnet 5.5, so the prompt asks for the tool, with one retry.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ sys.path.insert(0, str(EVALS_DIR))
 
 from dotenv import load_dotenv  # noqa: E402
 
+from agent.config import JUDGE_MODEL  # noqa: E402
 from agent.loop import create_client  # noqa: E402
 from agent.usage import add_costs, format_cost, request_cost, usage_counts  # noqa: E402
 from judge_prompt import JUDGE_PROMPT, SUBMIT_GRADES_TOOL, judge_request  # noqa: E402
@@ -40,8 +42,7 @@ from run_evals import result_files  # noqa: E402
 
 RESULTS_DIR = EVALS_DIR / "results"
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
-# Haiku 5.5 graded every case of test_grader_cases.py correctly (64/64) at about 1/14 of the Sonnet cost.
-DEFAULT_JUDGE_MODEL = "claude-haiku-5-5"
+DEFAULT_JUDGE_MODEL = JUDGE_MODEL
 # A rounded number ("74%", "$118K") passes if rounding the expected value could give
 # it, but the rounding allowance is capped at 1% of the expected value, so a coarse
 # number ("$1M" for 836,154) cannot pass. Counts with abs_tol 0 must be exact.
@@ -131,10 +132,53 @@ def compare_label(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool, s
     return ok, "an accepted value" if ok else "a different value"
 
 
+NUMBER_TEXT = re.compile(
+    r"(?P<sign>[-−])?\s*[$£€]?\s*(?P<num>\d[\d,]*(?:\.\d+)?|\.\d+)\s*(?P<unit>thousand|million|billion|bn|k|m)?\b",
+    re.IGNORECASE,
+)
+UNIT_FACTORS = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "bn": 1e9, "billion": 1e9}
+
+
+def parse_number(text: str) -> float | None:
+    """The first number in a value as written ("$118.4K", "8.98 million", "-1.1%"); None if there is none."""
+    match = NUMBER_TEXT.search(str(text))
+    if match is None:
+        return None
+    value = float(match["num"].replace(",", ""))
+    value *= UNIT_FACTORS.get((match["unit"] or "").lower(), 1)
+    return -value if match["sign"] else value
+
+
+def all_values_accepted(check: dict[str, Any], grade: dict[str, Any]) -> bool:
+    """For an answer that states several values: True if every one of them would pass.
+
+    The other values must be listed: an unknown other value is not known to be acceptable.
+    """
+    others = grade.get("other_values") or []
+    if not others:
+        return False
+    if check["type"] == "label":
+        values = [grade.get("label"), *others]
+        return all(compare_label(check, {"label": v})[0] for v in values if v)
+    if check["type"] == "number":
+        if not compare_number(check, grade)[0]:
+            return False
+        parsed = [parse_number(v) for v in others]
+        # A value that cannot be read is not known to be acceptable.
+        return all(v is not None and compare_number(check, {"value": v, "precision": grade.get("precision")})[0]
+                   for v in parsed)
+    if not compare_ranking(check, grade)[0]:
+        return False
+    rankings = [[item.strip() for item in re.split(r">|,|;", str(v)) if item.strip()] for v in others]
+    return all(compare_ranking(check, {"items": items})[0] for items in rankings)
+
+
 def compare(check: dict[str, Any], grade: dict[str, Any] | None) -> tuple[bool, str]:
     if grade is None:
         return False, "the judge did not report this check"
     if check["type"] in ("number", "label", "ranking") and grade.get("conflicting"):
+        if all_values_accepted(check, grade):
+            return True, "the answer states several values, and every one of them is acceptable"
         return False, "answer contradicts itself: it states different values and its result is unclear"
     if check["type"] == "number":
         return compare_number(check, grade)

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.config import SKILLS_DEFAULT  # noqa: E402
 from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint  # noqa: E402
@@ -54,9 +55,14 @@ def main() -> int:
         help="Do not load or save this dataset's memory from earlier sessions",
     )
     parser.add_argument(
+        "--skills",
+        action="store_true",
+        help="Offer skills (methodology guides) to the agent; off by default",
+    )
+    parser.add_argument(
         "--no-skills",
         action="store_true",
-        help="Do not offer skills (methodology guides) to the agent",
+        help="Do not offer skills (the default; kept for old commands)",
     )
     parser.add_argument(
         "--no-cache",
@@ -75,7 +81,7 @@ def main() -> int:
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
         skills = None
-        if not args.no_skills:
+        if (SKILLS_DEFAULT or args.skills) and not args.no_skills:
             skills, skill_warnings = load_skills()
             print(f"Skills: {len(skills)} available ({', '.join(skills) or 'none'})")
             for warning in skill_warnings:
