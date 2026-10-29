@@ -19,9 +19,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import sessions  # noqa: E402
-from agent.events import Event, ToolResult  # noqa: E402
+from agent.events import (  # noqa: E402
+    ApiCallFinished,
+    AssistantText,
+    Event,
+    RunFinished,
+    StepStarted,
+    ToolCall,
+    ToolResult,
+    VerificationFinished,
+    VerificationStarted,
+    VerifierEvent,
+)
 from agent.guard import check_code  # noqa: E402
-from agent.loop import create_client, run_agent  # noqa: E402
+from agent.loop import RunResult, create_client, run_agent  # noqa: E402
 from agent.mode import LOCAL, MODE_VARIABLE, PUBLIC, get_mode, load_server_environment  # noqa: E402
 from agent.redact import MASK, SecretFilter, mask_secrets  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
@@ -443,6 +454,50 @@ def test_app_public_with_key() -> None:
         sessions.check_api_key = original
 
 
+ANSWER = "**342 of 891 passengers survived** (38.4%); the column has no missing values."
+
+
+def rendered_turn() -> dict[str, Any]:
+    """A finished question with a no-argument tool call, an answer step and a verification."""
+    claims = [
+        {"claim": "342 survived", "status": "supported", "evidence": "sum = 342"},
+        {"claim": "38.5%", "status": "contradicted", "evidence": "mean = 0.3838", "correction": "38.4%"},
+    ]
+    events = [
+        StepStarted(1), ApiCallFinished(1, 1.2, 100, 20),
+        ToolCall(1, "get_schema", {}), ToolResult(1, "get_schema", "Rows: 891", False, 0.1),
+        StepStarted(2), ApiCallFinished(2, 2.5, 120, 60), AssistantText(2, ANSWER),
+        VerificationStarted(2),
+        VerifierEvent(StepStarted(1)), VerifierEvent(ApiCallFinished(1, 1.0, 50, 30)),
+        VerifierEvent(ToolCall(1, "report_verification", {"claims": claims})),
+        VerifierEvent(ToolResult(1, "report_verification", "Report accepted: 2 claims.", False, 0.0)),
+        VerificationFinished(2, None, None, False),
+    ]
+    result = RunResult(status="completed", final_answer=ANSWER, error_message=None, steps=2,
+                       input_tokens=270, output_tokens=110, duration_s=4.0)
+    events.append(RunFinished(result, 4.7, 0.1))
+    return {"question": "How many survived?", "events": events, "result": result}
+
+
+def test_app_render_steps() -> None:
+    at = app_test(None)
+    for name, value in {"turns": [rendered_turn()], "past_questions": 0, "past_tokens": 0,
+                        "past_cost": 0.0, "conversation_id": "test"}.items():
+        at.session_state[name] = value
+    at.run()
+    codes = [c.value for c in at.code]
+    markdown = [m.value for m in at.markdown]
+    captions = [c.value for c in at.caption]
+    answer_shown = sum(ANSWER in m for m in markdown)
+    report_line = any("Report: 1 supported · 1 contradicted · 0 unverifiable" in m for m in markdown)
+    report("s) steps: no '{}' block, answer step shows a note, report as one line",
+           not at.exception and "{}" not in codes and not any('"claims"' in c for c in codes)
+           and "Report accepted: 2 claims." not in codes and answer_shown == 1
+           and any("Final answer shown below" in c for c in captions) and report_line,
+           f"exception: {bool(at.exception)}; code blocks: {codes}; full answer shown {answer_shown} time(s); "
+           f"report line: {report_line}")
+
+
 def main() -> int:
     saved_key = os.environ.get("ANTHROPIC_API_KEY")
     saved_mode = os.environ.get(MODE_VARIABLE)
@@ -465,6 +520,7 @@ def main() -> int:
         test_app_local()
         test_app_public_without_key()
         test_app_public_with_key()
+        test_app_render_steps()
     finally:
         for name, value in (("ANTHROPIC_API_KEY", saved_key), (MODE_VARIABLE, saved_mode)):
             if value is None:

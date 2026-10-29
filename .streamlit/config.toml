@@ -1,0 +1,5 @@
+[client]
+# Hide the Deploy button and the developer menu items (rerun, clear cache,
+# settings); only items set in st.set_page_config would remain, and there are none,
+# so the menu is hidden.
+toolbarMode = "minimal"

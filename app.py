@@ -73,6 +73,9 @@ TOOL_ICONS = {
     "report_verification": ":material/fact_check:",
 }
 ANSWER_ICON = ":material/check:"
+# The answer is shown in full under the steps; its step only points there.
+ANSWER_NOTE = ":material/arrow_downward: Final answer shown below"
+DRAFT_NOTE = ":material/edit_note: Draft answer: the verifier asked for a revision (see the draft below the answer)"
 STREAM_REFRESH_S = 0.1  # how often streamed text is redrawn
 PLAN_ICONS = {
     "pending": ":material/radio_button_unchecked:",
@@ -291,6 +294,11 @@ class StepRenderer:
         # whether text arrives as live deltas or is replayed in full.
         self.caption_slot: DeltaGenerator | None = None
         self.text_slot: DeltaGenerator | None = None
+        # Every slot that shows model text in the current step, and whether any text came.
+        self.text_slots: list[DeltaGenerator] = []
+        self.has_text = False
+        # Where the last answer step's text was, to mark it as a draft later.
+        self.answer_slot: DeltaGenerator | None = None
         self.streamed_text = ""
         self.last_refresh = 0.0
         # The verifier's steps are drawn by a second renderer inside their own block.
@@ -307,6 +315,8 @@ class StepRenderer:
                 )
                 self.caption_slot = self.box.empty()
                 self.text_slot = self.box.empty()
+                self.text_slots = [self.text_slot]
+                self.has_text = False
                 self.streamed_text = ""
             case TextDelta(text=text) if self.text_slot:
                 self.streamed_text += text
@@ -326,19 +336,24 @@ class StepRenderer:
                 )
             case AssistantText(text=text) if self.box:
                 # The first text block replaces the streamed preview with the full text.
+                self.has_text = True
                 if self.text_slot is not None:
                     self.text_slot.markdown(escape_dollars(text))
                     self.text_slot = None
                 else:
-                    self.box.markdown(escape_dollars(text))
+                    slot = self.box.empty()
+                    slot.markdown(escape_dollars(text))
+                    self.text_slots.append(slot)
             case ToolCall(name=name, input=tool_input) if self.box:
                 self._clear_preview()
                 self.tools.append(name)
                 self.box.update(label=f"{self.label} {self.step} · {self._what()}")
                 code = tool_input.get("code")
-                if name == "update_plan":
-                    # The plan itself is shown above the steps.
-                    self.box.caption(":material/checklist: Plan updated")
+                if name == "update_plan" or not tool_input:
+                    # The plan is shown above the steps; a call without arguments has nothing to show.
+                    pass
+                elif name == "report_verification":
+                    self.box.markdown(report_summary(tool_input))
                 elif name == "ask_user":
                     options = "".join(f"\n- {option}" for option in tool_input.get("options") or [])
                     self.box.markdown(escape_dollars(f"**Question:** {tool_input.get('question')}{options}"))
@@ -350,7 +365,13 @@ class StepRenderer:
                 if event.is_error:
                     self.failed = True
                     self.box.error(f"{event.name} failed ({event.duration_s:.1f} s)")
-                self.box.code(event.output, language=None)
+                if event.name == "update_plan" and not event.is_error:
+                    # E.g. "Plan updated: 2/4 done." as a caption; the plan is above the steps.
+                    self.box.caption(f":material/checklist: {escape_dollars(event.output)}")
+                elif event.name == "report_verification" and not event.is_error:
+                    pass  # "Report accepted" repeats the summary drawn for the call
+                else:
+                    self.box.code(event.output, language=None)
                 for image in event.images:
                     self.box.image(base64.b64decode(image))
                 for path in event.chart_paths:
@@ -383,6 +404,8 @@ class StepRenderer:
                 summary = claim_counts(report) if report else "not completed"
                 if event.revision_requested:
                     summary += " · the agent revises its answer"
+                    if self.answer_slot is not None:
+                        self.answer_slot.caption(DRAFT_NOTE)
                 # A warning, if any, is shown with the answer.
                 self.verify_header.markdown(f":material/fact_check: **Verification** · {summary}")
                 self.verifier = None
@@ -413,6 +436,14 @@ class StepRenderer:
         if self.box is None:
             return
         self._clear_preview()
+        if self.label == "Step" and not self.tools and not self.api_error and self.has_text:
+            # An answer step: the full text is the main answer, not repeated here.
+            first, *rest = self.text_slots
+            first.caption(ANSWER_NOTE)
+            for slot in rest:
+                slot.empty()
+            self.answer_slot = first
+        self.text_slots = []
         self.box.update(
             label=f"{self.label} {self.step} · {self._what()}",
             state="error" if self.failed else "complete",
@@ -539,6 +570,14 @@ def show_result(result: RunResult) -> None:
         f"· {result.cache_read_tokens:,} cache read · {result.output_tokens:,} out · {money(result.cost_usd)} "
         f"· {result.duration_s:.1f} s · log: {result.log_path}"
     )
+
+
+def report_summary(tool_input: dict[str, Any]) -> str:
+    """The verifier's report as one line, e.g. 'Report: 5 supported · 1 contradicted · 0 unverifiable'."""
+    claims = tool_input.get("claims")
+    statuses = [c.get("status") for c in claims if isinstance(c, dict)] if isinstance(claims, list) else []
+    counts = " · ".join(f"{statuses.count(s)} {s}" for s in ("supported", "contradicted", "unverifiable"))
+    return f":material/fact_check: Report: {counts}"
 
 
 def claim_counts(report: VerificationReport, revised: bool = False) -> str:
@@ -727,8 +766,11 @@ if not has_key():
         f"**Example:** click *Use demo dataset* and ask: *{EXAMPLE_QUESTION}*",
         icon=":material/key:",
     )
+elif not turns and dataset is None:
+    where = "Upload a dataset or click *Use demo dataset*" if MODE.demo_dataset else "Upload a dataset"
+    st.info(f"{where} in the sidebar, then ask your first question below.")
 elif not turns:
-    st.info("Upload a dataset in the sidebar, then ask your first question below.")
+    st.info(escape_dollars(f"**{dataset['name']}** is loaded. Ask your first question below."))
 
 # The whole chat is redrawn from session_state on every rerun.
 for index, turn in enumerate(turns):
