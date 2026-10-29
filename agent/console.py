@@ -119,6 +119,8 @@ class ConsolePrinter:
                 self._end_line()
                 if result.status == "api_error":
                     print(f"[API error] {result.error_message}")
+                if result.revision_failed:
+                    print(f"[Warning] {result.verification_warning} (revision stopped: {result.status})")
                 print(
                     f"\n{SEPARATOR}\n"
                     f"Tokens used: input={result.input_tokens}, output={result.output_tokens}"

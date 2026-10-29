@@ -553,6 +553,23 @@ def main() -> int:
                f"calls={client.calls}, draft={result.draft_answer!r}, final={result.final_answer!r}, "
                f"history gets {history_sent[1]['content']!r}")
 
+        # u2) The revision runs into max_steps: the draft is kept as the answer, with a warning
+        client = FakeClient([
+            make_response([text("Revenue is 12.")], "end_turn"),
+            make_response([report_use([CLAIM_BAD])], "tool_use"),
+        ], repeat=make_response([tool_use("1")], "tool_use"))
+        result = run_agent("Revenue?", sb, client, max_steps=3, verify=True)  # type: ignore[arg-type]
+        log = read_log(result)
+        cleanup(result)
+        report("u2) revision hits max_steps -> draft + revision_failed",
+               result.status == "max_steps" and result.final_answer == "Revenue is 12."
+               and result.revision_failed and not result.revised
+               and result.verification_warning == agent.loop.REVISION_FAILED_WARNING
+               and log is not None and log["final_answer"] == "Revenue is 12." and log["revision_failed"]
+               and agent.loop.REVISION_FAILED_WARNING in log["warnings"],
+               f"status={result.status}, answer={result.final_answer!r}, "
+               f"revision_failed={result.revision_failed}, warning={result.verification_warning!r}")
+
         # v) The verifier never reports: answer unchanged, warning, still completed
         client = FakeClient([
             make_response([text("Revenue is 12.")], "end_turn"),

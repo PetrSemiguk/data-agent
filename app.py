@@ -305,7 +305,11 @@ def ask_question(slot: DeltaGenerator, result: RunResult, key: str) -> str | Non
 def show_result(result: RunResult) -> None:
     """Render the outcome of one run inside its chat message."""
     # st.error and st.warning render markdown too, so their text is escaped as well.
-    if result.status == "api_error":
+    if result.revision_failed:
+        # The answer below is the draft with known errors: say so loudly.
+        st.warning(escape_dollars(result.verification_warning or ""), icon=":material/warning:")
+        st.caption(escape_dollars(f"The revision stopped ({result.status}): {result.error_message}"))
+    elif result.status == "api_error":
         st.error(escape_dollars(result.error_message or "API error"))
     elif result.status != "completed":
         st.warning(escape_dollars(f"Stopped ({result.status}): {result.error_message}"))
@@ -313,12 +317,12 @@ def show_result(result: RunResult) -> None:
     if result.plan_incomplete:
         st.caption(":material/info: The agent answered before finishing every item of its plan.")
 
-    if result.verification_warning:
+    if result.verification_warning and not result.revision_failed:
         st.caption(escape_dollars(f":material/warning: {result.verification_warning}"))
     report = result.verification
     if report is not None and report.status != "incomplete":
         st.markdown(verification_badge(report, result.revised))
-        with st.expander("Verification details"):
+        with st.expander("Verification details", expanded=result.revision_failed):
             st.dataframe(
                 [
                     {
@@ -340,7 +344,7 @@ def show_result(result: RunResult) -> None:
     if result.final_answer:
         st.markdown(escape_dollars(result.final_answer))
 
-    if result.draft_answer is not None:
+    if result.revised and result.draft_answer is not None:
         with st.expander("Draft answer before verification"):
             st.markdown(escape_dollars(result.draft_answer))
 

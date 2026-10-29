@@ -65,6 +65,8 @@ def main() -> int:
     if result.final_answer:
         if result.revised:
             print("(Revised after verification; the draft is in the log.)")
+        if result.revision_failed:
+            print(f"(Unrevised draft. {result.verification_warning})")
         print(f"\n{result.final_answer}")
     print(
         f"\nSteps: {result.steps}, tokens in={result.input_tokens} out={result.output_tokens}, "

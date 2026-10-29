@@ -65,6 +65,10 @@ if TYPE_CHECKING:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 HAS_DIGIT = re.compile(r"\d")
+REVISION_FAILED_WARNING = (
+    "Verification found errors that the agent could not fix. "
+    "Showing the original draft — see the issues below."
+)
 
 # Errors raised while reading an already open stream; the SDK does not retry these.
 STREAM_BROKEN_ERRORS = (httpx2.TransportError, anthropic.APIConnectionError)
@@ -178,6 +182,8 @@ class RunResult:
     verification: "VerificationReport | None" = None
     draft_answer: str | None = None
     revised: bool = False
+    # The agent could not finish its revision: final_answer is the unrevised draft.
+    revision_failed: bool = False
     verification_warning: str | None = None
 
 
@@ -554,10 +560,16 @@ def continue_run(
             if plan_incomplete
             else []
         )
-        if state.verification_warning:
-            warnings.append(state.verification_warning)
         report = state.verification
         revised = status == "completed" and state.draft_answer is not None
+        # The revision ended without a new answer (step limit, budget, API error):
+        # the draft is better than nothing, but it is shown with a warning.
+        revision_failed = state.draft_answer is not None and status not in ("completed", "waiting_for_user")
+        if revision_failed:
+            final_answer = state.draft_answer
+            state.verification_warning = REVISION_FAILED_WARNING
+        if state.verification_warning:
+            warnings.append(state.verification_warning)
         # Totals include the verifier's run; its own share is listed separately.
         verify_in = report.input_tokens if report else 0
         verify_out = report.output_tokens if report else 0
@@ -573,6 +585,7 @@ def continue_run(
             verification=asdict(report) if report else None,
             draft_answer=state.draft_answer,
             revised=revised,
+            revision_failed=revision_failed,
             totals={
                 "steps": len(step_logs),
                 "input_tokens": state.input_tokens + verify_in,
@@ -607,6 +620,7 @@ def continue_run(
             verification=report,
             draft_answer=state.draft_answer,
             revised=revised,
+            revision_failed=revision_failed,
             verification_warning=state.verification_warning,
         )
         emit(
