@@ -31,3 +31,9 @@ An AI agent for data analysis. The user uploads a CSV/Excel file and asks a ques
 ## Security
 - NEVER read, print, or edit .env. The API key reaches the code only via the ANTHROPIC_API_KEY environment variable (loaded with python-dotenv).
 - Never put keys or tokens into code, logs, or commit messages.
+
+## API budget" (на английском):
+- Never call the real Claude API (agent runs, eval runs, grader cases, verifier cases) without my explicit approval in the current    message.
+- Before asking, state: what you want to run, how many API calls, and the estimated cost in $.
+- Default to tests with the fake client; a real run is only for things fakes cannot show.
+- Prefer the smallest real run that answers the question (1 question, 1 repeat) over a full run.
