@@ -468,23 +468,27 @@ def rendered_turn() -> dict[str, Any]:
         ToolCall(1, "get_schema", {}), ToolResult(1, "get_schema", "Rows: 891", False, 0.1),
         StepStarted(2), ApiCallFinished(2, 2.5, 120, 60), AssistantText(2, ANSWER),
         VerificationStarted(2),
-        VerifierEvent(StepStarted(1)), VerifierEvent(ApiCallFinished(1, 1.0, 50, 30)),
+        VerifierEvent(StepStarted(1)), VerifierEvent(ApiCallFinished(1, 1.0, 50, 30, 900, 1800)),
         VerifierEvent(ToolCall(1, "report_verification", {"claims": claims})),
         VerifierEvent(ToolResult(1, "report_verification", "Report accepted: 2 claims.", False, 0.0)),
         VerificationFinished(2, None, None, False),
     ]
     result = RunResult(status="completed", final_answer=ANSWER, error_message=None, steps=2,
-                       input_tokens=270, output_tokens=110, duration_s=4.0)
+                       input_tokens=270, output_tokens=110, duration_s=4.0, log_path="logs/runs/test.json")
     events.append(RunFinished(result, 4.7, 0.1))
     return {"question": "How many survived?", "events": events, "result": result}
 
 
-def test_app_render_steps() -> None:
-    at = app_test(None)
+def rendered_app(mode: str | None) -> AppTest:
+    at = app_test(mode)
     for name, value in {"turns": [rendered_turn()], "past_questions": 0, "past_tokens": 0,
                         "past_cost": 0.0, "conversation_id": "test"}.items():
         at.session_state[name] = value
-    at.run()
+    return at.run()
+
+
+def test_app_render_steps() -> None:
+    at = rendered_app(None)
     codes = [c.value for c in at.code]
     markdown = [m.value for m in at.markdown]
     captions = [c.value for c in at.caption]
@@ -496,6 +500,32 @@ def test_app_render_steps() -> None:
            and any("Final answer shown below" in c for c in captions) and report_line,
            f"exception: {bool(at.exception)}; code blocks: {codes}; full answer shown {answer_shown} time(s); "
            f"report line: {report_line}")
+
+
+def api_captions(at: AppTest) -> list[tuple[str, str]]:
+    """Step captions with the API call: (text, help)."""
+    return [(c.value, c.proto.help) for c in at.caption if c.value.endswith(" tokens")]
+
+
+def test_app_details_by_mode() -> None:
+    local, public = rendered_app(None), rendered_app("public")
+    results = {}
+    for name, at in (("local", local), ("public", public)):
+        captions = api_captions(at)
+        results[name] = {
+            "short API captions": [text for text, _ in captions],
+            "breakdown in help": all("cache read" in help for _, help in captions),
+            "log path": any("log: " in c.value for c in at.caption),
+            "skills": "Use skills" in labels(at, "toggle") or any(e.label.startswith("Skills (") for e in at.expander),
+            "exception": bool(at.exception),
+        }
+    expected_captions = ["1.2 s · 120 tokens", "2.5 s · 180 tokens", "1.0 s · 2,780 tokens"]
+    report("t) API caption short with breakdown in help; log path and skills only in local",
+           all(r["short API captions"] == expected_captions and r["breakdown in help"] and not r["exception"]
+               for r in results.values())
+           and results["local"]["log path"] and results["local"]["skills"]
+           and not results["public"]["log path"] and not results["public"]["skills"],
+           str(results))
 
 
 def main() -> int:
@@ -521,6 +551,7 @@ def main() -> int:
         test_app_public_without_key()
         test_app_public_with_key()
         test_app_render_steps()
+        test_app_details_by_mode()
     finally:
         for name, value in (("ANTHROPIC_API_KEY", saved_key), (MODE_VARIABLE, saved_mode)):
             if value is None:

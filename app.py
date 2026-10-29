@@ -329,10 +329,13 @@ class StepRenderer:
                 self.streamed_text = ""
                 self.text_slot.empty()
             case ApiCallFinished() if self.caption_slot:
+                total = event.input_tokens + event.cache_write_tokens + event.cache_read_tokens + event.output_tokens
                 self.caption_slot.caption(
-                    f"API call {event.duration_s:.1f} s · tokens in {event.input_tokens:,} "
-                    f"· cache write {event.cache_write_tokens:,} · cache read {event.cache_read_tokens:,} "
-                    f"· out {event.output_tokens:,}"
+                    f"{event.duration_s:.1f} s · {total:,} tokens",
+                    help=(
+                        f"API call: input {event.input_tokens:,} · cache write {event.cache_write_tokens:,} "
+                        f"· cache read {event.cache_read_tokens:,} · output {event.output_tokens:,}"
+                    ),
                 )
             case AssistantText(text=text) if self.box:
                 # The first text block replaces the streamed preview with the full text.
@@ -533,8 +536,8 @@ def show_result(result: RunResult) -> None:
             st.caption(
                 f"Check: {report.steps} steps · tokens {report.input_tokens:,} in · "
                 f"{report.cache_write_tokens:,} cache write · {report.cache_read_tokens:,} cache read · "
-                f"{report.output_tokens:,} out · {money(report.cost_usd)} · {report.duration_s:.1f} s · "
-                f"log: {report.log_path}"
+                f"{report.output_tokens:,} out · {money(report.cost_usd)} · {report.duration_s:.1f} s"
+                + log_note(report.log_path)
             )
 
     if result.final_answer:
@@ -568,8 +571,13 @@ def show_result(result: RunResult) -> None:
     st.caption(
         f"{result.steps} steps · tokens {result.input_tokens:,} in · {result.cache_write_tokens:,} cache write "
         f"· {result.cache_read_tokens:,} cache read · {result.output_tokens:,} out · {money(result.cost_usd)} "
-        f"· {result.duration_s:.1f} s · log: {result.log_path}"
+        f"· {result.duration_s:.1f} s" + log_note(result.log_path)
     )
+
+
+def log_note(log_path: str | None) -> str:
+    """' · log: <path>' where the mode shows log paths, else nothing."""
+    return f" · log: {log_path}" if MODE.show_log_paths and log_path else ""
 
 
 def report_summary(tool_input: dict[str, Any]) -> str:
@@ -679,7 +687,7 @@ load_server_environment(MODE)
 
 st.set_page_config(page_title="Data Agent", page_icon="📊", layout="wide")
 st.title("Data Agent")
-st.write("Upload a CSV or Excel file and ask questions about it in a chat.")
+st.write("An AI data analyst that writes and runs its own code, checks its numbers and shows every step.")
 
 if not MODE.visitor_key:
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -738,17 +746,19 @@ with st.sidebar:
         value=True,
         help="Load this dataset's notes from earlier sessions and let the agent save new ones.",
     )
-    use_skills = st.toggle(
-        "Use skills",
-        value=SKILLS_DEFAULT,
-        help="Offer the agent methodology guides (skills) it can load for the question.",
-    )
     skills, skill_warnings = get_skills()
-    with st.expander(f"Skills ({len(skills)})"):
-        for skill in skills.values():
-            st.markdown(f"**{skill.name}** · {escape_dollars(skill.description)}")
-        for warning in skill_warnings:
-            st.caption(escape_dollars(f":material/warning: {warning}"))
+    use_skills = SKILLS_DEFAULT
+    if MODE.show_skills:
+        use_skills = st.toggle(
+            "Use skills",
+            value=SKILLS_DEFAULT,
+            help="Offer the agent methodology guides (skills) it can load for the question.",
+        )
+        with st.expander(f"Skills ({len(skills)})"):
+            for skill in skills.values():
+                st.markdown(f"**{skill.name}** · {escape_dollars(skill.description)}")
+            for warning in skill_warnings:
+                st.caption(escape_dollars(f":material/warning: {warning}"))
     if MODE.memory and dataset is not None:
         memory_sidebar(get_memory_store(), st.session_state.fingerprint)
 

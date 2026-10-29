@@ -34,6 +34,10 @@ class Mode:
     session_dirs: bool
     # The "Use demo dataset" button.
     demo_dataset: bool
+    # Paths of run logs under answers: useful to the developer, internal details to a visitor.
+    show_log_paths: bool
+    # The "Use skills" toggle and the list of skills; when hidden, SKILLS_DEFAULT applies.
+    show_skills: bool
     # None: Streamlit's own limit (200 MB).
     max_upload_mb: int | None
     # None: no limit.
@@ -48,6 +52,8 @@ LOCAL = Mode(
     memory=True,
     session_dirs=False,
     demo_dataset=False,
+    show_log_paths=True,
+    show_skills=True,
     max_upload_mb=None,
     max_active_sessions=None,
     idle_kernel_minutes=None,
@@ -60,6 +66,8 @@ PUBLIC = Mode(
     memory=False,
     session_dirs=True,
     demo_dataset=True,
+    show_log_paths=False,
+    show_skills=False,
     max_upload_mb=MAX_UPLOAD_MB,
     max_active_sessions=MAX_ACTIVE_SESSIONS,
     idle_kernel_minutes=IDLE_KERNEL_MINUTES,
