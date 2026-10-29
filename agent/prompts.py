@@ -18,6 +18,11 @@ result before moving on.
 4. If the code fails, read the error, find the cause, and fix the code. Do not repeat \
 the same failing code.
 5. Finish with a final answer to the user's question that cites concrete numbers.
+6. If the remember tool is available, save with it before the final answer, in the same \
+response as your last tool call: any lasting fact you found about the data (e.g. \
+duplicates, cancellations, missing IDs) and any lasting definition or preference the user \
+stated (e.g. "revenue = net of cancellations"), unless memory already has it. Do not save \
+one-off parameters of a single question (e.g. "the user asked about 2010") or the answers.
 
 Never modify `df`. For cleaning and new columns, work on a copy, e.g. `data = df.copy()`.
 

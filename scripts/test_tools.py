@@ -110,8 +110,12 @@ def main() -> int:
            f"handler called {len(calls)} times; last reply: {answers[-1]}")
 
     # remember only validates and keeps notes for the end of the run: no sandbox needed
-    def remember_call(note_ids: set[int] | None = None, pending: int = 0, **tool_input: Any) -> tuple[str, bool, ToolContext]:
-        ctx = ToolContext(sandbox=None, memory_note_ids=note_ids if note_ids is not None else set())  # type: ignore[arg-type]
+    def remember_call(
+        note_ids: frozenset[int] | set[int] | None = frozenset(), pending: int = 0, **tool_input: Any
+    ) -> tuple[str, bool, ToolContext]:
+        """Call remember with the dataset's note ids; note_ids=None means memory is off."""
+        ids = None if note_ids is None else set(note_ids)
+        ctx = ToolContext(sandbox=None, memory_note_ids=ids)  # type: ignore[arg-type]
         ctx.pending_notes = [{"kind": "preference", "text": "x", "evidence": None, "replaces": None}] * pending
         text, is_error = execute_tool("remember", tool_input, ctx)
         return text, is_error, ctx
@@ -124,7 +128,7 @@ def main() -> int:
         "too long": remember_call(kind="preference", text="x" * (MEMORY_NOTE_MAX_CHARS + 1)),
         "unknown replaces id": remember_call(note_ids={1, 2}, replaces=7, **fact),
         "memory full": remember_call(note_ids=set(range(MEMORY_MAX_NOTES - 1)), pending=1, **fact),
-        "memory off": (*execute_tool("remember", fact, ToolContext(sandbox=None)), None),  # type: ignore[arg-type]
+        "memory off": remember_call(note_ids=None, **fact),
     }
     report("cc) remember validation", all(r[1] for r in bad_notes.values()),
            "; ".join(f"{k}: {r[0][:60]}" for k, r in bad_notes.items()))
