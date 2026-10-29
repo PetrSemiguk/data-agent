@@ -9,6 +9,8 @@ How a check is graded:
 - number and ranking: the judge model only EXTRACTS what the answer states
   (with a verbatim quote); this code compares it with the expected value;
 - mention and not_claim: the judge answers yes/no with a quote.
+If the agent revised its answer after the verifier's remarks, the draft is graded
+the same way (under "draft"), to measure what the verifier changed.
 The judge never sees the expected values. Expected values of the final split
 are never printed, only pass/fail.
 
@@ -34,6 +36,7 @@ from dotenv import load_dotenv  # noqa: E402
 from agent.loop import create_client  # noqa: E402
 from agent.usage import add_costs, format_cost, request_cost, usage_counts  # noqa: E402
 from judge_prompt import JUDGE_PROMPT, SUBMIT_GRADES_TOOL, judge_request  # noqa: E402
+from run_evals import result_files  # noqa: E402
 
 RESULTS_DIR = EVALS_DIR / "results"
 QUESTIONS_FILE = EVALS_DIR / "questions.json"
@@ -217,6 +220,19 @@ def print_grade(question: dict[str, Any], repeat: int, grade: dict[str, Any]) ->
               f"extracted={extracted!s:28} quote: {quote!r}")
 
 
+def draft_of(record: dict[str, Any]) -> str | None:
+    """The answer before revision, for revised runs; older result files keep it only in the run log."""
+    verification = record.get("verification") or {}
+    if not verification.get("revised"):
+        return None
+    if record.get("draft_answer"):
+        return record["draft_answer"]
+    log_path = Path(record.get("log_path") or "")
+    if log_path.is_file():
+        return json.loads(log_path.read_text(encoding="utf-8")).get("draft_answer")
+    return None
+
+
 def main(argv: list[str] | None = None, client: Any = None) -> int:
     parser = argparse.ArgumentParser(description="Grade the answers of an eval run.")
     parser.add_argument("--name", required=True, help="Name of the run in evals/results/")
@@ -234,9 +250,7 @@ def main(argv: list[str] | None = None, client: Any = None) -> int:
     client = client or create_client()
     total_cost: float | None = 0.0
     graded = skipped = 0
-    for result_path in sorted(run_dir.glob("*__r*.json")):
-        if result_path.name.endswith(".grade.json"):
-            continue
+    for result_path in result_files(run_dir):
         grade_path = result_path.with_name(result_path.stem + ".grade.json")
         if grade_path.exists() and not args.force:
             skipped += 1
@@ -245,10 +259,17 @@ def main(argv: list[str] | None = None, client: Any = None) -> int:
         question = questions[record["id"]]
         grade = {"id": record["id"], "repeat": record["repeat"], "split": question["split"],
                  **grade_answer(client, args.judge_model, question, record.get("final_answer"))}
+        draft = draft_of(record)
+        grade["draft"] = grade_answer(client, args.judge_model, question, draft) if draft else None
+        if grade["draft"]:
+            grade["judge_cost_usd"] = add_costs(grade["judge_cost_usd"], grade["draft"]["judge_cost_usd"])
         grade_path.write_text(json.dumps(grade, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         total_cost = add_costs(total_cost, grade["judge_cost_usd"])
         graded += 1
         print_grade(question, record["repeat"], grade)
+        if grade["draft"]:
+            print(f"  draft before revision: strict_pass={grade['draft']['strict_pass']}, "
+                  f"partial={grade['draft']['partial_score']:.2f}")
     print(f"\nGraded {graded} answers ({skipped} already graded; --force grades again), judge cost {format_cost(total_cost)}")
     return 0
 

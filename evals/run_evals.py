@@ -100,6 +100,11 @@ def config_of(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def result_files(run_dir: Path) -> list[Path]:
+    """The <id>__r<k>.json files of a run, without the .grade.json files next to them."""
+    return sorted(p for p in run_dir.glob("*__r*.json") if not p.name.endswith(".grade.json"))
+
+
 def git_commit() -> str:
     """Current commit, with '+dirty' if there are uncommitted changes."""
     try:
@@ -119,7 +124,7 @@ def estimate_cost_per_run(results_root: Path, config: dict[str, Any]) -> tuple[f
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("config") != config:
             continue
-        for result in manifest_path.parent.glob("*__r*.json"):
+        for result in result_files(manifest_path.parent):
             cost = json.loads(result.read_text(encoding="utf-8"))["cost"]["total"]
             if cost is not None:
                 costs.append(cost)
@@ -189,6 +194,8 @@ def record_of(question: dict[str, Any], repeat: int, result: RunResult) -> dict[
         "dataset": question["dataset"],
         "question": question["question"],
         "final_answer": result.final_answer,
+        # The answer before the verifier's remarks, if the agent revised it.
+        "draft_answer": result.draft_answer,
         "status": result.status,
         "error_message": result.error_message,
         "steps": result.steps,
@@ -332,7 +339,7 @@ def main(
 
 
 def print_summary(out_dir: Path) -> None:
-    records = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(out_dir.glob("*__r*.json"))]
+    records = [json.loads(p.read_text(encoding="utf-8")) for p in result_files(out_dir)]
     print(f"\n{'id':4} {'rep':>3} {'status':16} {'steps':>5} {'$':>7} {'time,s':>7} {'revised':8} skills")
     for r in records:
         revised = "-" if not r["verification"] else ("failed" if r["verification"]["revision_failed"] else str(r["verification"]["revised"]))
