@@ -92,8 +92,8 @@ IDLE_KERNEL_MINUTES = 15
 # Uploads, charts and logs of a session are deleted 2 hours after its last
 # activity: long enough for one visit, short enough not to keep visitors' data.
 SESSION_TTL_HOURS = 2
-# Larger than every test dataset (Online Retail II is 45 MB) yet bounded,
-# so a single upload cannot fill the server's memory.
+# Bounded so a single upload cannot fill the server's memory. Every test dataset
+# fits except Online Retail II (90 MB), which needs a sample or a higher limit.
 MAX_UPLOAD_MB = 50
 # How often idle kernels and old session folders are looked for.
 HOUSEKEEPING_INTERVAL_SECONDS = 60
