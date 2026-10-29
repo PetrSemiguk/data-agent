@@ -188,6 +188,8 @@ class AgentState:
     # verifier's own run is never verified.
     question: str = ""
     verify: bool = False
+    # Model of the verifier; None means the agent's own model.
+    verifier_model: str | None = None
     verified: bool = False
     revisions: int = 0
     verification: "VerificationReport | None" = None
@@ -282,6 +284,7 @@ def run_agent(
     memory: DatasetMemory | None = None,
     skills: dict[str, Skill] | None = None,
     cache: bool | None = None,
+    verifier_model: str | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -340,6 +343,7 @@ def run_agent(
         tools=[*TOOLS, *([LOAD_SKILL_TOOL] if skills else []), *([REMEMBER_TOOL] if memory else [])],
         skills=skills or None,
         cache=PROMPT_CACHE if cache is None else cache,
+        verifier_model=verifier_model,
         memory=memory,
         memory_note_ids=[note.id for note in notes],
     )
@@ -1014,7 +1018,7 @@ def verify_final_answer(
             answer,
             sandbox,
             client,
-            state.model,
+            state.verifier_model or state.model,
             on_event=lambda event: emit(VerifierEvent(event=event)),
             notes=facts,
             cache=state.cache,

@@ -24,6 +24,7 @@ uploads/
 outputs/
 logs/
 memory/
+evals/results/
 *.db
 *.sqlite
 
