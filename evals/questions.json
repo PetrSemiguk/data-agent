@@ -1,0 +1,684 @@
+[
+  {
+    "id": "d01",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev",
+    "question": "How many passengers are in the dataset, and how many of them survived?",
+    "category": "lookup",
+    "traps": [],
+    "checks": [
+      {
+        "type": "number",
+        "key": "passengers",
+        "description": "Number of passengers",
+        "value": 891.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "number",
+        "key": "survivors",
+        "description": "Number of survivors",
+        "value": 342.0,
+        "abs_tol": 0
+      }
+    ],
+    "reference": "d01_titanic_counts"
+  },
+  {
+    "id": "d02",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev",
+    "question": "Did women survive at a higher rate than men? Give the survival rate of each group.",
+    "category": "group_comparison",
+    "traps": [],
+    "checks": [
+      {
+        "type": "number",
+        "key": "female_rate",
+        "description": "Survival rate of women, in percent",
+        "value": 74.203822,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "male_rate",
+        "description": "Survival rate of men, in percent",
+        "value": 18.890815,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "mention",
+        "description": "States the number of women and the number of men the rates are based on"
+      }
+    ],
+    "reference": "d02_titanic_survival_by_sex"
+  },
+  {
+    "id": "d03",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev",
+    "question": "What is the average age of the passengers?",
+    "category": "data_quality_trap",
+    "traps": [
+      "Age is missing for some passengers; the average must be computed over known ages and the missing count stated"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "mean_age",
+        "description": "Mean age over passengers with a known age, in years",
+        "value": 29.699118,
+        "abs_tol": 0.05
+      },
+      {
+        "type": "number",
+        "key": "missing_ages",
+        "description": "Number of passengers with a missing age",
+        "value": 177.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not give an average that counts missing ages as zero or that fills them in without saying so"
+      }
+    ],
+    "reference": "d03_titanic_average_age"
+  },
+  {
+    "id": "d04",
+    "dataset": "Titanic-Dataset.csv",
+    "split": "dev",
+    "question": "Did passengers who survived pay more for their tickets than those who did not? Is the difference statistically significant?",
+    "category": "group_comparison",
+    "traps": [
+      "Fares are strongly right-skewed: the mean is far above the median, so medians or a rank-based test fit better than means alone"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "median_fare_survived",
+        "description": "Median fare of survivors",
+        "value": 26.0,
+        "abs_tol": 0.01
+      },
+      {
+        "type": "number",
+        "key": "median_fare_died",
+        "description": "Median fare of those who died",
+        "value": 10.5,
+        "abs_tol": 0.01
+      },
+      {
+        "type": "mention",
+        "description": "Names the statistical test used, says what it compares (means, medians or distributions) and reports its p-value"
+      },
+      {
+        "type": "mention",
+        "description": "Says that fares are skewed or that the mean and median differ a lot"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not claim that paying more caused passengers to survive"
+      }
+    ],
+    "reference": "d04_titanic_fare_by_survival"
+  },
+  {
+    "id": "d05",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev",
+    "question": "What are the total sales of each product category? Rank the categories from highest to lowest.",
+    "category": "aggregation",
+    "traps": [],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "category_ranking",
+        "description": "Categories by total sales, highest first",
+        "items": [
+          "Technology",
+          "Furniture",
+          "Office Supplies"
+        ],
+        "top_k": 3
+      },
+      {
+        "type": "number",
+        "key": "technology_sales",
+        "description": "Total sales of Technology",
+        "value": 836154.033,
+        "rel_tol": 0.002
+      }
+    ],
+    "reference": "d05_superstore_sales_by_category"
+  },
+  {
+    "id": "d06",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev",
+    "question": "Which three months had the highest sales in 2017? Give their sales.",
+    "category": "time_series",
+    "traps": [
+      "October and December 2017 are close; the ranking must follow the computed values"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "top_months",
+        "description": "Top three months of 2017 by sales, highest first",
+        "items": [
+          "November",
+          "September",
+          "December"
+        ],
+        "top_k": 3
+      },
+      {
+        "type": "number",
+        "key": "november_sales",
+        "description": "Sales in November 2017",
+        "value": 118447.825,
+        "rel_tol": 0.002
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not claim that October 2017 had higher sales than December 2017"
+      }
+    ],
+    "reference": "d06_superstore_top_months_2017"
+  },
+  {
+    "id": "d07",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev",
+    "question": "Which product category has the highest profit margin, defined as total profit divided by total sales? Rank all categories.",
+    "category": "aggregation",
+    "traps": [
+      "The two leading categories are close; an average of per-order margins gives a different order than the ratio of totals"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "margin_ranking",
+        "description": "Categories by profit margin (total profit / total sales), highest first",
+        "items": [
+          "Technology",
+          "Office Supplies",
+          "Furniture"
+        ],
+        "top_k": 3
+      },
+      {
+        "type": "number",
+        "key": "technology_margin",
+        "description": "Profit margin of Technology, in percent",
+        "value": 17.395712,
+        "abs_tol": 0.1
+      }
+    ],
+    "reference": "d07_superstore_margin_by_category"
+  },
+  {
+    "id": "d08",
+    "dataset": "Sample - Superstore.csv",
+    "split": "dev",
+    "question": "Which region has the lowest profit margin (total profit divided by total sales), and which sub-category loses the most money in that region?",
+    "category": "multi_step",
+    "traps": [],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "weakest_region",
+        "description": "Region with the lowest profit margin",
+        "items": [
+          "Central"
+        ],
+        "top_k": 1
+      },
+      {
+        "type": "number",
+        "key": "weakest_region_margin",
+        "description": "Profit margin of that region, in percent",
+        "value": 7.921629,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "ranking",
+        "key": "biggest_loss_subcategory",
+        "description": "Sub-category with the largest total loss in that region",
+        "items": [
+          "Furnishings"
+        ],
+        "top_k": 1
+      },
+      {
+        "type": "number",
+        "key": "biggest_loss",
+        "description": "Total profit of that sub-category in that region (a negative number)",
+        "value": -3906.2168,
+        "rel_tol": 0.01
+      }
+    ],
+    "reference": "d08_superstore_weakest_region"
+  },
+  {
+    "id": "d09",
+    "dataset": "online_retail_II.csv",
+    "split": "dev",
+    "question": "How many distinct customers made at least one purchase? Do not count cancellations as purchases.",
+    "category": "data_quality_trap",
+    "traps": [
+      "Many rows have no Customer ID and must not be counted as a customer",
+      "Cancellation invoices start with 'C'"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "customers",
+        "description": "Distinct customer IDs with at least one non-cancelled invoice",
+        "value": 5881.0,
+        "abs_tol": 5
+      },
+      {
+        "type": "mention",
+        "description": "Says that rows without a Customer ID were left out"
+      }
+    ],
+    "reference": "d09_retail_purchasing_customers",
+    "notes": "abs_tol 5 covers the variant that defines a purchase as Quantity > 0 and Price > 0 instead of a non-'C' invoice (3 fewer customers)."
+  },
+  {
+    "id": "d10",
+    "dataset": "online_retail_II.csv",
+    "split": "dev",
+    "question": "Did net revenue grow from 2010 to 2011? Use Quantity x Price over all rows, including returns, after removing exact duplicate rows.",
+    "category": "time_series",
+    "traps": [
+      "The data ends on 9 December 2011, so 2011 is incomplete; comparing full 2010 with partial 2011 wrongly shows a decline"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "growth_same_span_pct",
+        "description": "Growth of net revenue from 2010 to 2011 on comparable periods, in percent",
+        "value": 3.102197,
+        "abs_tol": 2.5
+      },
+      {
+        "type": "mention",
+        "description": "Says that the 2011 data ends on 9 December 2011 and adjusts the comparison for it"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not conclude that revenue declined from 2010 to 2011"
+      }
+    ],
+    "reference": "d10_retail_growth_2011",
+    "notes": "The reference compares 1 January - 9 December of both years. abs_tol 2.5 points also covers the other reasonable adjustment, revenue per day of data (about 2 points higher)."
+  },
+  {
+    "id": "d11",
+    "dataset": "online_retail_II.csv",
+    "split": "dev",
+    "question": "What was the net revenue in 2010? Compute it as Quantity x Price over all rows, including cancellations and returns, after removing exact duplicate rows.",
+    "category": "aggregation",
+    "traps": [
+      "The data has exact duplicate rows"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "net_revenue_2010",
+        "description": "Net revenue in 2010 after removing exact duplicates",
+        "value": 9079583.854,
+        "rel_tol": 0.001
+      },
+      {
+        "type": "number",
+        "key": "duplicates_removed",
+        "description": "Number of exact duplicate rows removed (whole dataset)",
+        "value": 34335.0,
+        "abs_tol": 0
+      }
+    ],
+    "reference": "d11_retail_net_revenue_2010"
+  },
+  {
+    "id": "h01",
+    "dataset": "WA_Fn-UseC_-HR-Employee-Attrition.csv",
+    "split": "holdout",
+    "question": "Does monthly income differ between employees who left and those who stayed? Is the difference statistically significant?",
+    "category": "group_comparison",
+    "traps": [
+      "Income is right-skewed; medians or a rank-based test fit better than means alone"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "median_income_left",
+        "description": "Median monthly income of employees who left",
+        "value": 3202.0,
+        "abs_tol": 0.5
+      },
+      {
+        "type": "number",
+        "key": "median_income_stayed",
+        "description": "Median monthly income of employees who stayed",
+        "value": 5204.0,
+        "abs_tol": 0.5
+      },
+      {
+        "type": "number",
+        "key": "n_left",
+        "description": "Number of employees who left",
+        "value": 237.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "number",
+        "key": "n_stayed",
+        "description": "Number of employees who stayed",
+        "value": 1233.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "Names the statistical test, says what it compares and reports its p-value"
+      },
+      {
+        "type": "mention",
+        "description": "Reports an effect size: the size of the difference in money or percent, or a standardized measure"
+      }
+    ],
+    "reference": "h01_hr_income_by_attrition"
+  },
+  {
+    "id": "h02",
+    "dataset": "WA_Fn-UseC_-HR-Employee-Attrition.csv",
+    "split": "holdout",
+    "question": "What is the attrition rate in each department? Rank the departments from highest to lowest.",
+    "category": "aggregation",
+    "traps": [
+      "One department is much smaller than the others, so its rate is less certain"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "department_ranking",
+        "description": "Departments by attrition rate, highest first",
+        "items": [
+          "Sales",
+          "Human Resources",
+          "Research & Development"
+        ],
+        "top_k": 3
+      },
+      {
+        "type": "number",
+        "key": "top_department_rate",
+        "description": "Attrition rate of the top department, in percent",
+        "value": 20.627803,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "mention",
+        "description": "States the number of employees in each department or flags that one department is small"
+      }
+    ],
+    "reference": "h02_hr_attrition_by_department"
+  },
+  {
+    "id": "h03",
+    "dataset": "WA_Fn-UseC_-HR-Employee-Attrition.csv",
+    "split": "holdout",
+    "question": "Among employees who work overtime, what share left the company? How does that compare with employees who do not work overtime?",
+    "category": "multi_step",
+    "traps": [],
+    "checks": [
+      {
+        "type": "number",
+        "key": "rate_overtime",
+        "description": "Attrition rate of employees who work overtime, in percent",
+        "value": 30.528846,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "rate_no_overtime",
+        "description": "Attrition rate of employees who do not work overtime, in percent",
+        "value": 10.436433,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not claim that overtime causes employees to leave"
+      }
+    ],
+    "reference": "h03_hr_attrition_by_overtime"
+  },
+  {
+    "id": "h04",
+    "dataset": "DailyDelhiClimateTrain.csv",
+    "split": "holdout",
+    "question": "Which year had the highest average temperature?",
+    "category": "time_series",
+    "traps": [
+      "The last year in the data has only one day; it must not be compared with full years"
+    ],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "warmest_year",
+        "description": "Warmest year by mean temperature, among complete years",
+        "items": [
+          "2016"
+        ],
+        "top_k": 1
+      },
+      {
+        "type": "number",
+        "key": "warmest_year_mean",
+        "description": "Mean temperature of that year",
+        "value": 27.103373,
+        "abs_tol": 0.05
+      },
+      {
+        "type": "mention",
+        "description": "Says that the last year has only one day of data and was left out or treated separately"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not rank the one-day year as the coldest or warmest year"
+      }
+    ],
+    "reference": "h04_climate_warmest_year"
+  },
+  {
+    "id": "h05",
+    "dataset": "DailyDelhiClimateTrain.csv",
+    "split": "holdout",
+    "question": "What is the average daily mean air pressure in the data?",
+    "category": "data_quality_trap",
+    "traps": [
+      "The pressure column contains physically impossible values that distort the mean"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "mean_pressure_clean",
+        "description": "Mean pressure after excluding physically impossible values (hPa)",
+        "value": 1008.178187,
+        "abs_tol": 0.5
+      },
+      {
+        "type": "mention",
+        "description": "Says that some pressure values are impossible and how they were handled"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not give the average that includes the impossible values as the answer"
+      }
+    ],
+    "reference": "h05_climate_average_pressure",
+    "notes": "The reference keeps 900-1100 hPa. abs_tol 0.5 covers other reasonable cleaning rules (950-1050 hPa, the IQR rule) and reporting the median instead."
+  },
+  {
+    "id": "f01",
+    "dataset": "heart.csv",
+    "split": "final",
+    "question": "Do patients with heart disease have different cholesterol levels from patients without it? Use an appropriate statistical test.",
+    "category": "group_comparison",
+    "traps": [
+      "Cholesterol is 0 for many patients, which means 'not measured'; these rows must be excluded"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "median_chol_disease",
+        "description": "Median cholesterol of patients with heart disease, zeros excluded",
+        "value": 246.0,
+        "abs_tol": 0.5
+      },
+      {
+        "type": "number",
+        "key": "median_chol_no_disease",
+        "description": "Median cholesterol of patients without heart disease, zeros excluded",
+        "value": 231.5,
+        "abs_tol": 0.5
+      },
+      {
+        "type": "number",
+        "key": "zero_cholesterol_rows",
+        "description": "Number of rows with cholesterol 0",
+        "value": 172.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "Says that cholesterol 0 means a missing measurement and that those rows were excluded"
+      },
+      {
+        "type": "mention",
+        "description": "Names the statistical test, says what it compares and reports its p-value"
+      }
+    ],
+    "reference": "f01_heart_cholesterol"
+  },
+  {
+    "id": "f02",
+    "dataset": "heart.csv",
+    "split": "final",
+    "question": "What percentage of male patients and of female patients have heart disease?",
+    "category": "aggregation",
+    "traps": [],
+    "checks": [
+      {
+        "type": "number",
+        "key": "rate_male",
+        "description": "Share of male patients with heart disease, in percent",
+        "value": 63.172414,
+        "abs_tol": 0.1
+      },
+      {
+        "type": "number",
+        "key": "rate_female",
+        "description": "Share of female patients with heart disease, in percent",
+        "value": 25.906736,
+        "abs_tol": 0.1
+      }
+    ],
+    "reference": "f02_heart_disease_by_sex"
+  },
+  {
+    "id": "f03",
+    "dataset": "kc_house_data.csv",
+    "split": "final",
+    "question": "Did the number of house sales in May 2015 drop compared with May 2014?",
+    "category": "time_series",
+    "traps": [
+      "The data ends before the end of May 2015, so May 2015 is incomplete and must be compared over the same days"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "sales_may_2015",
+        "description": "Number of sales in May 2015 (all days in the data)",
+        "value": 646.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "number",
+        "key": "sales_may_2014_same_days",
+        "description": "Number of sales in May 2014 up to the same day of the month as the last day of May 2015 in the data",
+        "value": 1511.0,
+        "abs_tol": 0
+      },
+      {
+        "type": "mention",
+        "description": "Says that May 2015 is incomplete (the data ends before the end of the month) and compares the same days or per-day rates"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not conclude that sales dropped by comparing all of May 2014 with the incomplete May 2015"
+      }
+    ],
+    "reference": "f03_houses_may_sales"
+  },
+  {
+    "id": "f04",
+    "dataset": "kc_house_data.csv",
+    "split": "final",
+    "question": "What is the typical sale price of a house in this data?",
+    "category": "aggregation",
+    "traps": [
+      "Prices are strongly right-skewed; the median describes a typical sale better than the mean"
+    ],
+    "checks": [
+      {
+        "type": "number",
+        "key": "median_price",
+        "description": "Median sale price",
+        "value": 450000.0,
+        "abs_tol": 1
+      },
+      {
+        "type": "mention",
+        "description": "Explains that the mean is higher than the median because of a few very expensive houses"
+      },
+      {
+        "type": "not_claim",
+        "description": "Does not present the mean as the typical price without mentioning the skew"
+      }
+    ],
+    "reference": "f04_houses_typical_price"
+  },
+  {
+    "id": "f05",
+    "dataset": "kc_house_data.csv",
+    "split": "final",
+    "question": "Among zipcodes with at least 100 sales, which three have the highest median price per square foot of living area (price divided by sqft_living)?",
+    "category": "multi_step",
+    "traps": [],
+    "checks": [
+      {
+        "type": "ranking",
+        "key": "top_zipcodes",
+        "description": "Zipcodes by median price per square foot, highest first",
+        "items": [
+          "98004",
+          "98109",
+          "98112"
+        ],
+        "top_k": 3
+      },
+      {
+        "type": "number",
+        "key": "top_zip_median_per_sqft",
+        "description": "Median price per square foot of the first zipcode",
+        "value": 456.944444,
+        "rel_tol": 0.005
+      }
+    ],
+    "reference": "f05_houses_price_per_sqft_zipcodes"
+  }
+]

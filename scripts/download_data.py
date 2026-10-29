@@ -42,6 +42,15 @@ def main() -> None:
     print("Path to dataset files:", path)
     copy_data_files(path)
 
+    # Final test datasets from new domains: the eval runs on them once, at the very end.
+    path = kagglehub.dataset_download("fedesoriano/heart-failure-prediction")
+    print("Path to dataset files:", path)
+    copy_data_files(path)
+
+    path = kagglehub.dataset_download("harlfoxem/housesalesprediction")
+    print("Path to dataset files:", path)
+    copy_data_files(path)
+
     # Show what ended up in data/.
     print("\nFiles in data/:")
     for file in sorted(DATA_DIR.iterdir()):
