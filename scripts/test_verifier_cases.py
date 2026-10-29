@@ -4,6 +4,7 @@ Each case is a short draft answer with a known error (or none), the question,
 and the dataset. The full output is also saved to logs/verifier_cases.txt.
 """
 
+import argparse
 import ast
 import sys
 from dataclasses import dataclass
@@ -17,22 +18,21 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.loop import create_client  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
+from agent.usage import format_cost  # noqa: E402
 from agent.verifier import VerificationReport, verify_answer  # noqa: E402
 
 DATA_DIR = PROJECT_ROOT / "data"
-OUTPUT_FILE = PROJECT_ROOT / "logs" / "verifier_cases.txt"
+OUTPUT_FILE = PROJECT_ROOT / "logs" / "verifier_cases_v2.txt"
 SUPERSTORE = "Sample - Superstore.csv"
 ONLINE_RETAIL = "online_retail_II.csv"
 
-# claude-sonnet-5-5 prices, USD per 1M tokens
-INPUT_PRICE = 2.00
-OUTPUT_PRICE = 10.00
 
-# Runs in the kernel before and after a check: a fingerprint of df and the
-# names the verifier must not create (its own start with _v_).
+# Runs in the kernel before and after a check: a fingerprint of df, the
+# kernel's own variable names, and how many separate namespaces still exist.
 SNAPSHOT_CODE = (
     "print(int(pd.util.hash_pandas_object(df, index=True).sum()))\n"
-    "print(sorted(k for k in globals() if not k.startswith('_')))"
+    "print(sorted(k for k in globals() if not k.startswith('_')))\n"
+    "print(len(globals().get('_sandbox_namespaces', {})))"
 )
 
 
@@ -47,6 +47,9 @@ class Case:
     # "ok": every claim supported and status ok.
     expect: str
     fragments: list[str]
+    # Borderline case: PASS with either verdict on the key claim, as long as its
+    # evidence cites this real value.
+    borderline_value: str | None = None
 
 
 CASES = [
@@ -61,6 +64,8 @@ CASES = [
         ),
         expect="contradicted",
         fragments=["15-17%"],
+        # 2015 is 14.6%: outside 15-17% exactly, inside it after rounding to whole percent.
+        borderline_value="14.6",
     ),
     Case(
         name="b) wrong month comparison",
@@ -132,6 +137,10 @@ def judge(case: Case, report: VerificationReport) -> tuple[bool, str]:
         return False, f"no report: {report.error_message}"
     key = [c for c in report.claims if any(f in normalize(c.claim) for f in case.fragments)]
     contradicted = [c for c in report.claims if c.status == "contradicted"]
+    if case.borderline_value is not None:
+        ok = any(case.borderline_value in c.evidence for c in key)
+        verdicts = ", ".join(c.status for c in key) or "no key claim"
+        return ok, f"BORDERLINE ({verdicts}; {case.borderline_value} {'cited' if ok else 'NOT cited'} in evidence)"
     if case.expect == "contradicted":
         ok = any(c.status == "contradicted" for c in key)
         return ok, "key claim contradicted" if ok else "key claim not contradicted"
@@ -142,23 +151,27 @@ def judge(case: Case, report: VerificationReport) -> tuple[bool, str]:
     return ok, "all claims supported" if ok else "not every claim supported"
 
 
-def snapshot(sandbox: Sandbox) -> tuple[str, set[str]]:
+def snapshot(sandbox: Sandbox) -> tuple[str, set[str], str]:
     result = sandbox.execute(SNAPSHOT_CODE)
-    fingerprint, names = result.stdout.strip().splitlines()
-    return fingerprint, set(ast.literal_eval(names))
+    fingerprint, names, namespaces = result.stdout.strip().splitlines()
+    return fingerprint, set(ast.literal_eval(names)), namespaces
 
 
-def cost(input_tokens: int, output_tokens: int) -> float:
-    return (input_tokens * INPUT_PRICE + output_tokens * OUTPUT_PRICE) / 1_000_000
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Verifier regression cases on the real API.")
+    parser.add_argument("--model", default="claude-sonnet-5-5", help="Model of the verifier")
+    parser.add_argument("--output", default=str(OUTPUT_FILE), help="Where to save the output")
+    args = parser.parse_args()
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
     load_dotenv()
+    out(f"Verifier model: {args.model}")
     client = create_client()
     passed = 0
     false_alarms = 0
     total_in = total_out = 0
+    total_cost = 0.0
     total_time = 0.0
 
     with Sandbox() as sandbox:
@@ -167,15 +180,16 @@ def main() -> int:
             if case.dataset != loaded:
                 sandbox.load_dataframe(DATA_DIR / case.dataset)
                 loaded = case.dataset
-            before_hash, before_names = snapshot(sandbox)
+            before_hash, before_names, _ = snapshot(sandbox)
 
-            report = verify_answer(case.question, case.answer, sandbox, client)
+            report = verify_answer(case.question, case.answer, sandbox, client, model=args.model)
 
-            after_hash, after_names = snapshot(sandbox)
+            after_hash, after_names, namespaces_left = snapshot(sandbox)
             ok, reason = judge(case, report)
             passed += ok
             total_in += report.input_tokens
             total_out += report.output_tokens
+            total_cost += report.cost_usd or 0.0
             total_time += report.duration_s
 
             out("=" * 78)
@@ -195,11 +209,12 @@ def main() -> int:
             new_names = sorted(after_names - before_names)
             out(
                 f"  isolation: df {'unchanged' if before_hash == after_hash else 'CHANGED'}, "
-                f"new names without _v_: {new_names or 'none'}"
+                f"new kernel variables: {new_names or 'none'}, namespaces left: {namespaces_left}"
             )
             out(
                 f"  steps {report.steps}, tokens {report.input_tokens} in / {report.output_tokens} out "
-                f"(${cost(report.input_tokens, report.output_tokens):.3f}), {report.duration_s:.1f}s"
+                f"(cache write {report.cache_write_tokens}, read {report.cache_read_tokens}; "
+                f"{format_cost(report.cost_usd, 4)}), {report.duration_s:.1f}s"
             )
             out(f"  log: {report.log_path}")
 
@@ -208,10 +223,11 @@ def main() -> int:
     out(f"Total: {passed}/{count} passed, contradicted outside planted errors: {false_alarms}")
     out(
         f"Average per check: {total_in // count} in / {total_out // count} out tokens, "
-        f"${cost(total_in, total_out) / count:.3f}, {total_time / count:.1f}s"
+        f"${total_cost / count:.4f} (total ${total_cost:.4f}), {total_time / count:.1f}s"
     )
-    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines_out) + "\n", encoding="utf-8")
     return 0 if passed == count else 1
 
 

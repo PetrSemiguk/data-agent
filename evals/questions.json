@@ -1220,9 +1220,21 @@
         "key": "top_products",
         "description": "Products by revenue, highest first (by product description)",
         "items": [
-          "REGENCY CAKESTAND 3 TIER",
-          "WHITE HANGING HEART T-LIGHT HOLDER",
-          "JUMBO BAG RED WHITE SPOTTY"
+          [
+            "REGENCY CAKESTAND 3 TIER",
+            "22423"
+          ],
+          [
+            "WHITE HANGING HEART T-LIGHT HOLDER",
+            "CREAM HANGING HEART T-LIGHT HOLDER",
+            "85123A"
+          ],
+          [
+            "JUMBO BAG RED RETROSPOT",
+            "JUMBO BAG RED WHITE SPOTTY",
+            "RED RETROSPOT JUMBO BAG",
+            "85099B"
+          ]
         ],
         "top_k": 3,
         "order": "descending"

@@ -407,13 +407,14 @@ def o05() -> dict[str, Any]:
 def o06() -> dict[str, Any]:
     unique, _, header = retail_unique_rows()
     q, p, code, desc = (header.index(c) for c in ("Quantity", "Price", "StockCode", "Description"))
-    revenue, names = defaultdict(float), {}
+    revenue, names = defaultdict(float), defaultdict(lambda: defaultdict(int))
     for r in unique:
         if r[code][:1].isdigit():
             revenue[r[code]] += float(r[q]) * float(r[p])
-            names.setdefault(r[code], r[desc].strip())
+            if r[desc].strip() and float(r[p]) > 0:  # zero-price lines are stock notes, not names
+                names[r[code]][r[desc].strip()] += 1
     top = sorted(revenue, key=revenue.get, reverse=True)[:3]
-    return {"top_products": [names[c] for c in top]}
+    return {"top_products": [sorted(names[c], key=lambda n: (-names[c][n], n)) + [c] for c in top]}
 
 
 def o07() -> dict[str, Any]:

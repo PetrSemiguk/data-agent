@@ -84,6 +84,13 @@ def main() -> int:
     ]:
         ok, why = g.compare_ranking(ranking, {"items": items})
         report(name, ok == expected, f"{items} -> passed={ok} ({why})")
+    names = {"type": "ranking", "description": "Top products", "top_k": 2, "order": "descending",
+             "items": [["REGENCY CAKESTAND 3 TIER", "22423"], ["JUMBO BAG RED RETROSPOT", "JUMBO BAG RED WHITE SPOTTY", "85099B"]]}
+    report("r2) any name of an item matches",
+           g.compare_ranking(names, {"items": ["Regency cakestand 3 tier", "JUMBO BAG RED WHITE SPOTTY"]})[0]
+           and g.compare_ranking(names, {"items": ["22423", "85099B"]})[0]
+           and not g.compare_ranking(names, {"items": ["JUMBO BAG RED RETROSPOT", "REGENCY CAKESTAND 3 TIER"]})[0],
+           "any description or the code passes per position; swapped order fails")
     top1 = {"type": "ranking", "description": "Weakest region", "items": ["Central"], "top_k": 1, "order": "ascending"}
     report("s) top_k=1 uses the first item", g.compare_ranking(top1, {"items": ["Central", "South"]})[0]
            and not g.compare_ranking(top1, {"items": ["South", "Central"]})[0], "Central first passes, South first fails")

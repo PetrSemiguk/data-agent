@@ -98,7 +98,11 @@ def same_item(expected: str, stated: str) -> bool:
 
 
 def compare_ranking(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool, str]:
-    """Pass if the first top_k stated items match the expected ones in order."""
+    """Pass if the first top_k stated items match the expected ones in order.
+
+    An expected item may be a list of names for the same thing (for example all
+    descriptions of one product and its code); any of them matches.
+    """
     stated = grade.get("items")
     if not stated:
         return False, "the answer gives no ranking for this"
@@ -106,7 +110,10 @@ def compare_ranking(check: dict[str, Any], grade: dict[str, Any]) -> tuple[bool,
     got = list(stated)[: check["top_k"]]
     if len(got) < len(want):
         return False, f"only {len(got)} of {len(want)} ranked items stated"
-    ok = all(same_item(w, g) for w, g in zip(want, got))
+    ok = all(
+        any(same_item(name, g) for name in (w if isinstance(w, list) else [w]))
+        for w, g in zip(want, got)
+    )
     return ok, "same order" if ok else "different order or items"
 
 

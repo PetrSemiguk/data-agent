@@ -376,8 +376,19 @@ def o06_retail_top_products() -> dict[str, Any]:
     # Product codes start with a digit; postage, manual lines, fees and adjustments do not.
     products = data[data["StockCode"].astype(str).str[0].str.isdigit()]
     revenue = products.groupby("StockCode")["Revenue"].sum().sort_values(ascending=False)
-    names = products.groupby("StockCode")["Description"].first().str.strip()
-    return {"top_products": [names[code] for code in revenue.index[:3]]}
+    # One product can have several descriptions; any of them (or its code) names it.
+    return {"top_products": [product_names(products, code) for code in revenue.index[:3]]}
+
+
+def product_names(products: pd.DataFrame, code: str) -> list[str]:
+    """All descriptions of a stock code on sales lines, most frequent first (ties by name), then the code.
+
+    Lines with a zero price are stock notes ("damaged", "?") and do not name the product.
+    """
+    sold = products[(products["StockCode"] == code) & (products["Price"] > 0)]
+    counts = sold["Description"].dropna().str.strip().value_counts()
+    names = sorted(counts.index, key=lambda name: (-counts[name], name))
+    return [*names, str(code)]
 
 
 def o07_superstore_top_state() -> dict[str, Any]:
