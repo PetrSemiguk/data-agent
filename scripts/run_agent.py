@@ -33,6 +33,11 @@ def main() -> int:
         action="store_true",
         help="Never ask the user; the agent must make and state its own assumptions",
     )
+    parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Do not fact-check the final answer with the verifier",
+    )
     args = parser.parse_args()
     # Symbols such as ✔ may not exist in the console encoding; print '?' instead of failing.
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
@@ -51,12 +56,15 @@ def main() -> int:
             ask_user_fn=ask_user_fn,
             dataset_file=args.file,
             on_event=ConsolePrinter(),
+            verify=False if args.no_verify else None,
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
     if result.error_message:
         print(f"Error: {result.error_message}")
     if result.final_answer:
+        if result.revised:
+            print("(Revised after verification; the draft is in the log.)")
         print(f"\n{result.final_answer}")
     print(
         f"\nSteps: {result.steps}, tokens in={result.input_tokens} out={result.output_tokens}, "

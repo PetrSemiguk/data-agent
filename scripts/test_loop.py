@@ -20,7 +20,9 @@ from agent.config import (  # noqa: E402
     MAX_USER_QUESTIONS,
     OUTPUTS_DIR,
 )
+import agent.loop  # noqa: E402
 from agent.events import (  # noqa: E402
+    AnswerRevised,
     ApiCallFinished,
     AssistantText,
     Event,
@@ -32,8 +34,11 @@ from agent.events import (  # noqa: E402
     TextDelta,
     ToolCall,
     ToolResult,
+    VerificationFinished,
+    VerificationStarted,
+    VerifierEvent,
 )
-from agent.loop import RunResult, resume_agent, run_agent  # noqa: E402
+from agent.loop import RunResult, build_messages, resume_agent, run_agent  # noqa: E402
 from agent.tools import QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -155,12 +160,14 @@ class FakeClient:
         self.repeat = repeat
         self.calls = 0
         self.requests: list[list[Any]] = []
+        self.systems: list[str] = []
         self.messages = self
 
     def stream(self, **kwargs: Any) -> FakeStream:
         self.calls += 1
         # A copy of what the model would see on this call.
         self.requests.append(list(kwargs["messages"]))
+        self.systems.append(kwargs["system"])
         reply = self.replies.pop(0) if self.replies else self.repeat
         return FakeStream(reply)
 
@@ -191,7 +198,29 @@ def run(
     return result, log
 
 
+def report_use(claims: list[dict[str, str]], block_id: str = "toolu_report") -> Any:
+    return SimpleNamespace(type="tool_use", id=block_id, name="report_verification", input={"claims": claims})
+
+
+CLAIM_OK = {"claim": "Revenue is 10", "status": "supported", "evidence": "sum = 10"}
+CLAIM_BAD = {"claim": "Revenue is 12", "status": "contradicted", "evidence": "sum = 10",
+             "correction": "Revenue is 10"}
+LOGS = PROJECT_ROOT / "logs" / "runs"
+
+
+def verified_run(sb: Sandbox, client: FakeClient, events: list[Event] | None = None,
+                 verify: bool | None = True) -> tuple[RunResult, dict[str, Any] | None]:
+    result = run_agent("Revenue?", sb, client, verify=verify,  # type: ignore[arg-type]
+                       on_event=events.append if events is not None else None)
+    log = read_log(result)
+    cleanup(result)
+    return result, log
+
+
 def main() -> int:
+    # The older tests script no verifier replies, so checking is off unless a test turns it on.
+    agent.loop.VERIFY_ANSWERS = False
+    verifier_logs_before = set(LOGS.glob("*_verify.json"))
     with Sandbox() as sb:
         # a) Two steps: tool call, then a final answer
         client = FakeClient([
@@ -479,6 +508,110 @@ def main() -> int:
                result.status == "max_steps" and result.steps == 3 and client.calls == 3,
                f"steps={result.steps}; {result.error_message}")
 
+        # t) Verification ok: the answer is kept, revised=False, tokens include the check
+        events = []
+        client = FakeClient([
+            make_response([text("Revenue is 10.")], "end_turn"),
+            make_response([report_use([CLAIM_OK])], "tool_use", tokens_in=50, tokens_out=10),
+        ])
+        result, log = verified_run(sb, client, events)
+        kinds = [type(e).__name__ for e in events if not isinstance(e, TextDelta)]
+        inner = [type(e.event).__name__ for e in events if isinstance(e, VerifierEvent)]
+        report("t) verification ok -> no revision",
+               result.status == "completed" and result.final_answer == "Revenue is 10." and not result.revised
+               and result.verification is not None and result.verification.status == "ok"
+               and client.calls == 2 and client.systems[1].startswith("You are a fact-checker")
+               and result.input_tokens == 150 and result.output_tokens == 30
+               and "VerificationStarted" in kinds and "VerificationFinished" in kinds
+               and "AnswerRevised" not in kinds and "StepStarted" in inner
+               and log is not None and log["verification"]["status"] == "ok" and log["revised"] is False
+               and log["totals"]["verification"]["input_tokens"] == 50,
+               f"verification={result.verification.status if result.verification else None}, "
+               f"tokens in={result.input_tokens}, verifier events: {' -> '.join(dict.fromkeys(inner))}")
+
+        # u) Contradicted claim: the agent gets the remarks, answers again, no second check
+        events = []
+        client = FakeClient([
+            make_response([text("Revenue is 12.")], "end_turn"),
+            make_response([report_use([CLAIM_BAD])], "tool_use"),
+            make_response([text("Corrected: revenue is 10.")], "end_turn"),
+        ])
+        result, log = verified_run(sb, client, events)
+        remarks = client.requests[2][-1]["content"] if client.calls >= 3 else ""
+        revised_events = [e for e in events if isinstance(e, AnswerRevised)]
+        finished = [e for e in events if isinstance(e, VerificationFinished)]
+        history_sent = build_messages("Next?", [("Revenue?", result.final_answer or "")])
+        report("u) contradicted -> revised answer",
+               result.status == "completed" and result.revised
+               and result.draft_answer == "Revenue is 12." and result.final_answer == "Corrected: revenue is 10."
+               and client.calls == 3 and client.systems[2] == client.systems[0]
+               and "Revenue is 12" in remarks and "Correction: Revenue is 10" in remarks
+               and len(finished) == 1 and finished[0].revision_requested and len(revised_events) == 1
+               and history_sent[1]["content"] == "Corrected: revenue is 10."
+               and log is not None and log["revised"] and log["draft_answer"] == "Revenue is 12."
+               and log["verification"]["claims"][0]["status"] == "contradicted",
+               f"calls={client.calls}, draft={result.draft_answer!r}, final={result.final_answer!r}, "
+               f"history gets {history_sent[1]['content']!r}")
+
+        # v) The verifier never reports: answer unchanged, warning, still completed
+        client = FakeClient([
+            make_response([text("Revenue is 12.")], "end_turn"),
+            make_response([text("I think it is fine.")], "end_turn"),
+        ])
+        result, log = verified_run(sb, client)
+        report("v) incomplete check -> answer kept + warning",
+               result.status == "completed" and result.final_answer == "Revenue is 12." and not result.revised
+               and result.verification is not None and result.verification.status == "incomplete"
+               and "incomplete" in (result.verification_warning or "")
+               and log is not None and any("incomplete" in w for w in log["warnings"]),
+               f"warning: {result.verification_warning}")
+
+        # w) API error inside the verifier: answer unchanged, warning
+        client = FakeClient([
+            make_response([text("Revenue is 12.")], "end_turn"),
+            api_error(anthropic.InternalServerError, 500, "server down"),
+        ])
+        result, log = verified_run(sb, client)
+        report("w) verifier API error -> answer kept + warning",
+               result.status == "completed" and result.final_answer == "Revenue is 12."
+               and result.verification is not None and result.verification.status == "incomplete"
+               and "HTTP 500" in (result.verification_warning or ""),
+               f"warning: {result.verification_warning}")
+
+        # x) The verifier crashes with an unexpected exception: the run still completes
+        client = FakeClient([
+            make_response([text("Revenue is 12.")], "end_turn"),
+            RuntimeError("kernel is gone"),
+        ])
+        result, log = verified_run(sb, client)
+        report("x) verifier crash -> answer kept + warning",
+               result.status == "completed" and result.final_answer == "Revenue is 12."
+               and result.verification is None and "kernel is gone" in (result.verification_warning or "")
+               and log is not None and any("Verification failed" in w for w in log["warnings"]),
+               f"warning: {result.verification_warning}")
+
+        # y) An answer without digits is not checked
+        client = FakeClient([make_response([text("Technology leads.")], "end_turn")])
+        events = []
+        result, _ = verified_run(sb, client, events)
+        report("y) no digits -> no check",
+               client.calls == 1 and result.verification is None
+               and not any(isinstance(e, VerificationStarted) for e in events),
+               f"calls={client.calls}, verification={result.verification}")
+
+        # z) Checking switched off: verify=False (--no-verify) and VERIFY_ANSWERS=False
+        client = FakeClient([make_response([text("Revenue is 12.")], "end_turn")])
+        off_arg, _ = verified_run(sb, client, verify=False)
+        calls_arg = client.calls
+        client = FakeClient([make_response([text("Revenue is 12.")], "end_turn")])
+        off_config, _ = verified_run(sb, client, verify=None)
+        report("z) verification switched off",
+               calls_arg == 1 and client.calls == 1
+               and off_arg.verification is None and off_config.verification is None,
+               f"API calls: verify=False -> {calls_arg}, VERIFY_ANSWERS=False -> {client.calls}")
+
+    for path in set(LOGS.glob("*_verify.json")) - verifier_logs_before:
+        path.unlink()
     print(f"\nTotal: {passed} passed, {failed} failed")
     return 0 if failed == 0 else 1
 

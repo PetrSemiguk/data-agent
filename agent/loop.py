@@ -3,11 +3,13 @@
 import copy
 import json
 import logging
+import re
 import time
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import anthropic
 import httpx2
@@ -17,11 +19,14 @@ from agent.config import (
     API_TIMEOUT_SECONDS,
     LOGS_DIR,
     MAX_HISTORY_TURNS,
+    MAX_REVISIONS,
     MAX_STEPS,
     MAX_TOTAL_TOKENS,
     OUTPUTS_DIR,
+    VERIFY_ANSWERS,
 )
 from agent.events import (
+    AnswerRevised,
     ApiCallFinished,
     AssistantText,
     Event,
@@ -36,6 +41,9 @@ from agent.events import (
     PlanUpdated,
     UserAnswered,
     UserQuestion,
+    VerificationFinished,
+    VerificationStarted,
+    VerifierEvent,
 )
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
@@ -51,8 +59,12 @@ from agent.tools import (
     resolve_answer,
 )
 
+if TYPE_CHECKING:
+    from agent.verifier import VerificationReport
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+HAS_DIGIT = re.compile(r"\d")
 
 # Errors raised while reading an already open stream; the SDK does not retry these.
 STREAM_BROKEN_ERRORS = (httpx2.TransportError, anthropic.APIConnectionError)
@@ -98,7 +110,8 @@ class AgentState:
     """
 
     run_id: str
-    output_dir: Path
+    # None for runs that save no files (the verifier).
+    output_dir: Path | None
     log_path: Path
     log: dict[str, Any]
     model: str
@@ -123,6 +136,18 @@ class AgentState:
     # A successful call of this tool ends the run; its input is kept here.
     finish_tool: str | None = None
     finish_input: dict[str, Any] | None = None
+    # Kernel namespace for the run's code; None means the kernel's globals.
+    namespace: str | None = None
+    # Checking the final answer. Only run_agent turns `verify` on, so the
+    # verifier's own run is never verified.
+    question: str = ""
+    verify: bool = False
+    verified: bool = False
+    revisions: int = 0
+    verification: "VerificationReport | None" = None
+    verification_warning: str | None = None
+    # The answer before the agent revised it after the verifier's remarks.
+    draft_answer: str | None = None
 
 
 @dataclass
@@ -148,6 +173,12 @@ class RunResult:
     plan: list[dict[str, str]] | None = None
     # True if the agent answered while plan items were still pending/in progress.
     plan_incomplete: bool = False
+    # The verifier's report (None if the answer was not checked). Tokens and
+    # duration above include the verification; the report has its own share.
+    verification: "VerificationReport | None" = None
+    draft_answer: str | None = None
+    revised: bool = False
+    verification_warning: str | None = None
 
 
 def create_client() -> anthropic.Anthropic:
@@ -168,6 +199,7 @@ def run_agent(
     history: list[tuple[str, str]] | None = None,
     conversation_id: str | None = None,
     turn: int | None = None,
+    verify: bool | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -183,6 +215,10 @@ def run_agent(
     - neither: the agent is told the user is not available and must assume.
     `on_event` receives progress events; the loop itself prints nothing.
     API errors do not raise: they end the run with status "api_error".
+
+    With `verify` (default VERIFY_ANSWERS), a final answer that contains numbers
+    is checked by the verifier; if it contradicts claims, the agent gets the
+    remarks and revises the answer within the same run and limits.
     """
     emit = safe_emitter(on_event)
     state = new_state(
@@ -196,7 +232,10 @@ def run_agent(
             "dataset_file": dataset_file,
             "question": question,
         },
+        question=question,
+        verify=VERIFY_ANSWERS if verify is None else verify,
     )
+    assert state.output_dir is not None
     emit(RunStarted(run_id=state.run_id, output_dir=state.output_dir.as_posix(), log_path=state.log_path.as_posix()))
     return continue_run(state, sandbox, client, emit, ask_user_fn, pause_on_ask)
 
@@ -206,26 +245,34 @@ def new_state(
     model: str,
     max_steps: int,
     log_fields: dict[str, Any],
+    log_suffix: str | None = None,
     **settings: Any,
 ) -> AgentState:
     """Create the run folder, the log file and the state of a new run.
 
     `log_fields` are extra keys for the log; `settings` are other AgentState
     fields (the verifier passes its system prompt, tools and finish tool).
+    A run with `log_suffix` gets no output folder, only the log file
+    logs/runs/<timestamp><log_suffix>.json.
     """
-    # Every run saves its files (charts) and its log under the same run id.
-    run_dir = create_run_dir()
-    log_path = PROJECT_ROOT / LOGS_DIR / f"{run_dir.name}.json"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    run_dir: Path | None = None
+    if log_suffix is None:
+        # Every run saves its files (charts) and its log under the same run id.
+        run_dir = create_run_dir()
+        log_path = PROJECT_ROOT / LOGS_DIR / f"{run_dir.name}.json"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        log_path = create_unique(PROJECT_ROOT / LOGS_DIR, f"{log_suffix}.json", create_empty_file)
+    run_id = log_path.stem
     state = AgentState(
-        run_id=run_dir.name,
+        run_id=run_id,
         output_dir=run_dir,
         log_path=log_path,
         model=model,
         max_steps=max_steps,
         messages=messages,
         log={
-            "run_id": run_dir.name,
+            "run_id": run_id,
             **log_fields,
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "finished_at": None,
@@ -320,6 +367,7 @@ def continue_run(
         ask_user_fn=ask_user_fn,
         questions_asked=state.questions_asked,
         plan=state.plan,
+        namespace=state.namespace,
     )
     step_logs: list[dict[str, Any]] = state.log["steps"]
 
@@ -383,8 +431,15 @@ def continue_run(
                     emit(ToolCall(step=step, name=block.name, input=block.input))
 
             if response.stop_reason == "end_turn":
+                answer = extract_text(response.content)
+                if needs_verification(state, answer) and verify_final_answer(state, answer, sandbox, client, emit):
+                    # The remarks are in the messages now: the agent works on.
+                    write_log(state.log_path, state.log)
+                    continue
                 status = "completed"
-                final_answer = extract_text(response.content)
+                final_answer = answer
+                if state.draft_answer is not None:
+                    emit(AnswerRevised(step=step, draft_answer=state.draft_answer, final_answer=answer))
                 break
 
             if response.stop_reason != "tool_use":
@@ -487,7 +542,8 @@ def continue_run(
         state.questions_asked = ctx.questions_asked
         state.plan = ctx.plan
         state.active_seconds += time.perf_counter() - segment_start
-        state.charts = [chart.as_posix() for chart in sorted(state.output_dir.glob("*.png"))]
+        if state.output_dir is not None:
+            state.charts = [chart.as_posix() for chart in sorted(state.output_dir.glob("*.png"))]
         # Not enforced for now: a final answer with open plan items is only flagged.
         open_items = [
             item["id"] for item in state.plan or [] if item["status"] in ("pending", "in_progress")
@@ -498,6 +554,13 @@ def continue_run(
             if plan_incomplete
             else []
         )
+        if state.verification_warning:
+            warnings.append(state.verification_warning)
+        report = state.verification
+        revised = status == "completed" and state.draft_answer is not None
+        # Totals include the verifier's run; its own share is listed separately.
+        verify_in = report.input_tokens if report else 0
+        verify_out = report.output_tokens if report else 0
         state.log.update(
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
@@ -507,13 +570,21 @@ def continue_run(
             plan_incomplete=plan_incomplete,
             warnings=warnings,
             charts=state.charts,
+            verification=asdict(report) if report else None,
+            draft_answer=state.draft_answer,
+            revised=revised,
             totals={
                 "steps": len(step_logs),
-                "input_tokens": state.input_tokens,
-                "output_tokens": state.output_tokens,
+                "input_tokens": state.input_tokens + verify_in,
+                "output_tokens": state.output_tokens + verify_out,
                 "duration_s": round(state.active_seconds, 2),
                 "api_duration_s": round(state.api_seconds, 2),
                 "code_duration_s": round(state.code_seconds, 2),
+                "verification": {
+                    "input_tokens": verify_in,
+                    "output_tokens": verify_out,
+                    "duration_s": report.duration_s if report else 0.0,
+                },
             },
         )
         write_log(state.log_path, state.log)
@@ -523,8 +594,8 @@ def continue_run(
             final_answer=final_answer,
             error_message=error_message,
             steps=len(step_logs),
-            input_tokens=state.input_tokens,
-            output_tokens=state.output_tokens,
+            input_tokens=state.input_tokens + verify_in,
+            output_tokens=state.output_tokens + verify_out,
             duration_s=round(state.active_seconds, 2),
             charts=state.charts,
             log_path=state.log_path.as_posix(),
@@ -533,6 +604,10 @@ def continue_run(
             state=state if waiting else None,
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
+            verification=report,
+            draft_answer=state.draft_answer,
+            revised=revised,
+            verification_warning=state.verification_warning,
         )
         emit(
             RunFinished(
@@ -543,6 +618,75 @@ def continue_run(
         )
 
     return result
+
+
+def needs_verification(state: AgentState, answer: str) -> bool:
+    """Check a final answer once per run, and only if it contains numbers."""
+    return state.verify and not state.verified and bool(HAS_DIGIT.search(answer))
+
+
+def verify_final_answer(
+    state: AgentState,
+    answer: str,
+    sandbox: Sandbox,
+    client: anthropic.Anthropic,
+    emit: EventHandler,
+) -> bool:
+    """Run the verifier on the answer; True if the agent must now revise it.
+
+    A failed or incomplete check never stops the run: the answer stays as it
+    is and a warning is kept for the result and the log.
+    """
+    # Imported here because agent.verifier itself imports this module.
+    from agent.verifier import verify_answer
+
+    state.verified = True
+    emit(VerificationStarted(step=state.step))
+    report: VerificationReport | None = None
+    try:
+        report = verify_answer(
+            state.question,
+            answer,
+            sandbox,
+            client,
+            state.model,
+            on_event=lambda event: emit(VerifierEvent(event=event)),
+        )
+    except Exception as exc:
+        logger.exception("Verification crashed")
+        state.verification_warning = f"Verification failed ({type(exc).__name__}: {exc}); the answer was not checked."
+    else:
+        state.verification = report
+        if report.status == "incomplete":
+            state.verification_warning = f"Verification incomplete: {report.error_message} The answer was not checked."
+
+    revise = report is not None and report.status == "issues_found" and state.revisions < MAX_REVISIONS
+    emit(
+        VerificationFinished(
+            step=state.step, report=report, warning=state.verification_warning, revision_requested=revise
+        )
+    )
+    if revise and report is not None:
+        state.revisions += 1
+        state.draft_answer = answer
+        state.messages.append({"role": "user", "content": revision_request(report)})
+    return revise
+
+
+def revision_request(report: VerificationReport) -> str:
+    """The message that hands the verifier's remarks to the agent."""
+    remarks = "\n".join(
+        f"{number}. Claim: \"{claim.claim}\"\n   Evidence: {claim.evidence}\n   Correction: {claim.correction}"
+        for number, claim in enumerate(
+            (claim for claim in report.claims if claim.status == "contradicted"), start=1
+        )
+    )
+    return (
+        "A fact-checker recomputed the claims of your answer from the data and found "
+        f"these claims wrong:\n\n{remarks}\n\n"
+        "Check these points (you may run code), then give the complete corrected final "
+        "answer to the original question. Keep the parts that were not contradicted."
+    )
 
 
 def safe_emitter(on_event: EventHandler | None) -> EventHandler:
@@ -605,15 +749,24 @@ def stream_message(
 
 def create_run_dir() -> Path:
     """Create outputs/<timestamp>/, adding a suffix if that run id is taken."""
+    return create_unique(PROJECT_ROOT / OUTPUTS_DIR, "", Path.mkdir)
+
+
+def create_empty_file(path: Path) -> None:
+    """Create an empty file; FileExistsError if it already exists."""
+    path.open("x").close()
+
+
+def create_unique(root: Path, ending: str, create: Callable[[Path], None]) -> Path:
+    """Create root/<timestamp><ending> with `create`, adding _2, _3, ... if it exists."""
     base = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    root = PROJECT_ROOT / OUTPUTS_DIR
     root.mkdir(parents=True, exist_ok=True)
     counter = 1
     while True:
-        run_dir = root / (base if counter == 1 else f"{base}_{counter}")
+        path = root / f"{base if counter == 1 else f'{base}_{counter}'}{ending}"
         try:
-            run_dir.mkdir()
-            return run_dir
+            create(path)
+            return path
         except FileExistsError:
             counter += 1
 

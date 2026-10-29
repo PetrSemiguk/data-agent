@@ -31,6 +31,8 @@ MAX_TOTAL_TOKENS = 200_000  # input + output for the whole run
 
 # Verifier: a separate run that fact-checks a final answer
 VERIFY_MAX_STEPS = 6
+VERIFY_ANSWERS = True  # check final answers that contain numbers
+MAX_REVISIONS = 1  # times the agent may fix an answer the verifier contradicted
 
 # Claude API client; the SDK itself retries 408/409/429/5xx and connection errors
 API_MAX_RETRIES = 4

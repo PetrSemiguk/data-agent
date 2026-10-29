@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agent.loop import RunResult
+    from agent.verifier import VerificationReport
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,44 @@ class UserAnswered:
 
 
 @dataclass(frozen=True)
+class VerificationStarted:
+    """The agent gave a final answer; the verifier starts checking it."""
+
+    step: int
+
+
+@dataclass(frozen=True)
+class VerifierEvent:
+    """An event of the verifier's own run (its steps, tool calls, text).
+
+    Wrapping keeps the verifier's steps apart from the agent's: they have their
+    own step numbers, and a display can draw them in a separate block.
+    """
+
+    event: Event
+
+
+@dataclass(frozen=True)
+class VerificationFinished:
+    """The check ended. `report` is None if the verifier crashed; then `warning` says why."""
+
+    step: int
+    report: VerificationReport | None
+    warning: str | None
+    # True if the agent now gets the remarks and revises its answer.
+    revision_requested: bool
+
+
+@dataclass(frozen=True)
+class AnswerRevised:
+    """The agent replaced its answer after the verifier's remarks."""
+
+    step: int
+    draft_answer: str
+    final_answer: str
+
+
+@dataclass(frozen=True)
 class RunFinished:
     """Sent when a run ends and also when it pauses for a question."""
 
@@ -116,6 +155,10 @@ Event = (
     | PlanUpdated
     | UserQuestion
     | UserAnswered
+    | VerificationStarted
+    | VerifierEvent
+    | VerificationFinished
+    | AnswerRevised
     | RunFinished
 )
 EventHandler = Callable[[Event], None]

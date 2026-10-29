@@ -3,6 +3,7 @@
 import json
 
 from agent.events import (
+    AnswerRevised,
     ApiCallFinished,
     AssistantText,
     Event,
@@ -16,10 +17,14 @@ from agent.events import (
     ToolResult,
     UserAnswered,
     UserQuestion,
+    VerificationFinished,
+    VerificationStarted,
+    VerifierEvent,
 )
 
 SEPARATOR = "-" * 80
 PLAN_MARKS = {"pending": "☐", "in_progress": "▶", "done": "✔", "skipped": "✖"}
+CLAIM_MARKS = {"supported": "✔", "contradicted": "✖", "unverifiable": "?"}
 
 
 class ConsolePrinter:
@@ -29,6 +34,8 @@ class ConsolePrinter:
         # Text of the current step already shown through deltas.
         self.streamed = False
         self.line_open = False
+        # Who writes the streamed text: the agent or, during a check, the verifier.
+        self.speaker = "Agent"
 
     def __call__(self, event: Event) -> None:
         match event:
@@ -39,7 +46,7 @@ class ConsolePrinter:
                 print(f"\n{'=' * 30} Step {step} {'=' * 30}")
             case TextDelta(text=text):
                 if not self.streamed:
-                    print("[Agent]")
+                    print(f"[{self.speaker}]")
                     self.streamed = True
                 print(text, end="", flush=True)
                 self.line_open = not text.endswith("\n")
@@ -56,7 +63,7 @@ class ConsolePrinter:
             case AssistantText(text=text):
                 # Already printed piece by piece while it was generated.
                 if not self.streamed:
-                    print(f"[Agent]\n{text}")
+                    print(f"[{self.speaker}]\n{text}")
             case ToolCall(name=name, input=tool_input):
                 code = tool_input.get("code")
                 if isinstance(code, str):
@@ -74,6 +81,40 @@ class ConsolePrinter:
                 print(f"[Waiting for the user] {question}")
             case UserAnswered(answer=answer):
                 print(f"[User answered] {answer or '(left to the agent)'}")
+            case VerificationStarted():
+                self._end_line()
+                self.speaker = "Verifier"
+                print(f"\n{'#' * 28} Verification {'#' * 28}")
+            case VerifierEvent(event=inner):
+                # The verifier's steps are printed like the agent's, with their own header.
+                if isinstance(inner, StepStarted):
+                    self.streamed = False
+                    print(f"\n{'-' * 26} Check step {inner.step} {'-' * 26}")
+                elif not isinstance(inner, (RunStarted, RunFinished)):
+                    self(inner)
+            case VerificationFinished(report=report, warning=warning):
+                self._end_line()
+                self.speaker = "Agent"
+                print(f"\n{'#' * 22} Verification result {'#' * 22}")
+                if report is not None:
+                    for claim in report.claims:
+                        print(f"  {CLAIM_MARKS.get(claim.status, '?')} {claim.claim}")
+                        if claim.status != "supported":
+                            print(f"      {claim.evidence}")
+                        if claim.correction:
+                            print(f"      -> {claim.correction}")
+                    counts = ", ".join(f"{count} {name}" for name, count in report.counts.items())
+                    print(
+                        f"Status: {report.status} ({counts}); tokens in={report.input_tokens} "
+                        f"out={report.output_tokens}, {report.duration_s:.1f}s"
+                    )
+                if warning:
+                    print(f"[Warning] {warning}")
+                if event.revision_requested:
+                    print("[Contradicted claims were sent back to the agent: it revises the answer]")
+            case AnswerRevised():
+                self._end_line()
+                print("[Answer revised after verification]")
             case RunFinished(result=result):
                 self._end_line()
                 if result.status == "api_error":
@@ -86,6 +127,11 @@ class ConsolePrinter:
                     f"Time: total={result.duration_s:.1f}s, API={event.api_duration_s:.1f}s, "
                     f"code={event.code_duration_s:.1f}s"
                 )
+                if result.verification is not None:
+                    print(
+                        f"  of them verification: input={result.verification.input_tokens}, "
+                        f"output={result.verification.output_tokens}"
+                    )
                 print(f"Saved charts ({len(result.charts)}):")
                 for chart in result.charts:
                     print(f"  {chart}")

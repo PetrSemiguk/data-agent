@@ -7,12 +7,14 @@ from typing import Literal
 import anthropic
 
 from agent.config import VERIFY_MAX_STEPS
+from agent.events import EventHandler
 from agent.loop import continue_run, new_state, safe_emitter, write_log
 from agent.prompts import VERIFIER_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import CLAIM_STATUSES, GET_SCHEMA_TOOL, REPORT_VERIFICATION_TOOL, RUN_CODE_TOOL
 
 VERIFIER_TOOLS = [GET_SCHEMA_TOOL, RUN_CODE_TOOL, REPORT_VERIFICATION_TOOL]
+VERIFIER_NAMESPACE = "verifier"
 
 VerificationStatus = Literal["ok", "issues_found", "incomplete"]
 
@@ -61,22 +63,29 @@ def verify_answer(
     client: anthropic.Anthropic,
     model: str = "claude-sonnet-5-5",
     max_steps: int = VERIFY_MAX_STEPS,
+    on_event: EventHandler | None = None,
 ) -> VerificationReport:
     """Recompute the claims of `answer` with code in a fresh model context.
 
-    Runs in the same kernel as the agent, so it sees `df` and the agent's
-    variables; the prompt tells it to work on copies with `_v_` names.
+    Runs in the agent's kernel but in a separate namespace with its own copy of
+    `df`, so it cannot see or change the agent's variables. The namespace is
+    deleted afterwards. Only a log is written, no output folder.
     """
     state = new_state(
         [{"role": "user", "content": verification_request(question, answer)}],
         model,
         max_steps,
         {"role": "verifier", "question": question, "answer_checked": answer},
+        log_suffix="_verify",
         system=VERIFIER_PROMPT,
         tools=VERIFIER_TOOLS,
         finish_tool=REPORT_VERIFICATION_TOOL["name"],
+        namespace=VERIFIER_NAMESPACE,
     )
-    result = continue_run(state, sandbox, client, safe_emitter(None), None, pause_on_ask=False)
+    try:
+        result = continue_run(state, sandbox, client, safe_emitter(on_event), None, pause_on_ask=False)
+    finally:
+        sandbox.drop_namespace(VERIFIER_NAMESPACE)
 
     claims: list[ClaimCheck] = []
     error_message = result.error_message

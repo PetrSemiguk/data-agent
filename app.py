@@ -20,6 +20,7 @@ from streamlit.elements.lib.mutable_status_container import StatusContainer
 from streamlit.runtime.uploaded_file_manager import UploadedFile
 
 from agent.events import (
+    AnswerRevised,
     ApiCallFinished,
     AssistantText,
     Event,
@@ -31,10 +32,14 @@ from agent.events import (
     ToolCall,
     ToolResult,
     UserAnswered,
+    VerificationFinished,
+    VerificationStarted,
+    VerifierEvent,
 )
 from agent.loop import RunResult, create_client, resume_agent, run_agent
 from agent.sandbox import Sandbox
 from agent.tools import plan_summary
+from agent.verifier import VerificationReport
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 UPLOADS_DIR = PROJECT_ROOT / "uploads"
@@ -46,6 +51,7 @@ TOOL_ICONS = {
     "run_code": ":material/code:",
     "save_chart": ":material/bar_chart:",
     "ask_user": ":material/help:",
+    "report_verification": ":material/fact_check:",
 }
 ANSWER_ICON = ":material/check:"
 STREAM_REFRESH_S = 0.1  # how often streamed text is redrawn
@@ -55,6 +61,7 @@ PLAN_ICONS = {
     "done": ":material/check_circle:",
     "skipped": ":material/cancel:",
 }
+CLAIM_ICONS = {"supported": "✔", "contradicted": "✖", "unverifiable": "?"}
 
 # Code blocks and inline code are shown literally, so $ inside them is left alone.
 CODE_SPAN = re.compile(r"(```.*?```|`[^`\n]*`)", re.DOTALL)
@@ -135,9 +142,16 @@ class StepRenderer:
     collapsed. Finished steps collapse and are marked complete or failed.
     """
 
-    def __init__(self, parent: DeltaGenerator, live: bool, plan_slot: DeltaGenerator | None = None) -> None:
+    def __init__(
+        self,
+        parent: DeltaGenerator,
+        live: bool,
+        plan_slot: DeltaGenerator | None = None,
+        label: str = "Step",
+    ) -> None:
         self.parent = parent
         self.live = live
+        self.label = label
         # The plan is drawn above the steps and redrawn whenever it changes.
         self.plan_slot = plan_slot
         self.box: StatusContainer | None = None
@@ -151,6 +165,9 @@ class StepRenderer:
         self.text_slot: DeltaGenerator | None = None
         self.streamed_text = ""
         self.last_refresh = 0.0
+        # The verifier's steps are drawn by a second renderer inside their own block.
+        self.verifier: StepRenderer | None = None
+        self.verify_header: DeltaGenerator | None = None
 
     def __call__(self, event: Event) -> None:
         match event:
@@ -158,7 +175,7 @@ class StepRenderer:
                 self._finish()
                 self.step, self.tools, self.failed = step, [], False
                 self.box = self.parent.status(
-                    f"Step {step} · thinking...", expanded=self.live, state="running"
+                    f"{self.label} {step} · thinking...", expanded=self.live, state="running"
                 )
                 self.caption_slot = self.box.empty()
                 self.text_slot = self.box.empty()
@@ -188,7 +205,7 @@ class StepRenderer:
             case ToolCall(name=name, input=tool_input) if self.box:
                 self._clear_preview()
                 self.tools.append(name)
-                self.box.update(label=f"Step {self.step} · {self._what()}")
+                self.box.update(label=f"{self.label} {self.step} · {self._what()}")
                 code = tool_input.get("code")
                 if name == "update_plan":
                     # The plan itself is shown above the steps.
@@ -217,6 +234,24 @@ class StepRenderer:
                 self.parent.container(border=True).markdown(
                     escape_dollars(f":material/help: **Question** · {question}\n\n**Your answer:** {shown}")
                 )
+            case VerificationStarted():
+                self._finish()
+                area = self.parent.container(border=True)
+                self.verify_header = area.empty()
+                self.verify_header.markdown(":material/fact_check: **Verification** · checking the answer...")
+                self.verifier = StepRenderer(area, self.live, label="Check")
+            case VerifierEvent(event=inner) if self.verifier:
+                self.verifier(inner)
+            case VerificationFinished(report=report) if self.verify_header:
+                summary = claim_counts(report) if report else "not completed"
+                if event.revision_requested:
+                    summary += " · the agent revises its answer"
+                # A warning, if any, is shown with the answer.
+                self.verify_header.markdown(f":material/fact_check: **Verification** · {summary}")
+                self.verifier = None
+            case AnswerRevised():
+                self._finish()
+                self.parent.caption(":material/edit_note: Answer revised after verification")
             case RunFinished(result=result):
                 self.api_error = result.status == "api_error"
                 self.failed = self.failed or self.api_error
@@ -242,7 +277,7 @@ class StepRenderer:
             return
         self._clear_preview()
         self.box.update(
-            label=f"Step {self.step} · {self._what()}",
+            label=f"{self.label} {self.step} · {self._what()}",
             state="error" if self.failed else "complete",
             expanded=False,
         )
@@ -278,8 +313,36 @@ def show_result(result: RunResult) -> None:
     if result.plan_incomplete:
         st.caption(":material/info: The agent answered before finishing every item of its plan.")
 
+    if result.verification_warning:
+        st.caption(escape_dollars(f":material/warning: {result.verification_warning}"))
+    report = result.verification
+    if report is not None and report.status != "incomplete":
+        st.markdown(verification_badge(report, result.revised))
+        with st.expander("Verification details"):
+            st.dataframe(
+                [
+                    {
+                        "Status": f"{CLAIM_ICONS.get(claim.status, '')} {claim.status}",
+                        "Claim": claim.claim,
+                        "Evidence": claim.evidence,
+                        "Correction": claim.correction or "",
+                    }
+                    for claim in report.claims
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+            st.caption(
+                f"Check: {report.steps} steps · tokens {report.input_tokens:,} in / "
+                f"{report.output_tokens:,} out · {report.duration_s:.1f} s · log: {report.log_path}"
+            )
+
     if result.final_answer:
         st.markdown(escape_dollars(result.final_answer))
+
+    if result.draft_answer is not None:
+        with st.expander("Draft answer before verification"):
+            st.markdown(escape_dollars(result.draft_answer))
 
     for chart in result.charts:
         st.image(chart, caption=Path(chart).name)
@@ -288,6 +351,24 @@ def show_result(result: RunResult) -> None:
         f"{result.steps} steps · tokens {result.input_tokens:,} in / {result.output_tokens:,} out "
         f"· {result.duration_s:.1f} s · log: {result.log_path}"
     )
+
+
+def claim_counts(report: VerificationReport, revised: bool = False) -> str:
+    """E.g. '7 supported · 1 corrected · 1 unverifiable'; zero counts are left out."""
+    names = {"contradicted": "corrected"} if revised else {}
+    parts = [f"{count} {names.get(status, status)}" for status, count in report.counts.items() if count]
+    return " · ".join(parts) or "no claims"
+
+
+def verification_badge(report: VerificationReport, revised: bool) -> str:
+    """One line above the answer: how the check went."""
+    if revised:
+        badge = ":orange-badge[:material/edit_note: Revised after verification]"
+    elif report.status == "ok":
+        badge = ":green-badge[:material/verified: Verified]"
+    else:
+        badge = ":red-badge[:material/error: Issues found]"
+    return f"{badge} · {claim_counts(report, revised)}"
 
 
 def turn_tokens(turns: list[dict[str, Any]]) -> int:
@@ -316,8 +397,9 @@ def live_handler(events: list[Event], renderer: StepRenderer) -> Callable[[Event
     """Draw events as they come and keep them for redrawing on later reruns."""
 
     def on_event(event: Event) -> None:
-        # Deltas are not kept: AssistantText carries the full text.
-        if not isinstance(event, (TextDelta, StreamReset)):
+        # Deltas are not kept, also the verifier's: AssistantText carries the full text.
+        inner = event.event if isinstance(event, VerifierEvent) else event
+        if not isinstance(inner, (TextDelta, StreamReset)):
             events.append(event)
         renderer(event)
 
@@ -362,6 +444,13 @@ with st.sidebar:
             sandbox.restart()
             sandbox.load_dataframe(st.session_state.dataset_path)
         new_conversation()
+
+    verify = st.toggle(
+        "Verify answers",
+        value=True,
+        help="A second model rechecks the numbers of each answer with code; "
+        "contradicted claims are sent back to the agent to fix.",
+    )
 
     turns: list[dict[str, Any]] = st.session_state.turns
     questions = st.session_state.past_questions + len(turns)
@@ -433,6 +522,7 @@ if prompt:
                 history=history,
                 conversation_id=st.session_state.conversation_id,
                 turn=len(turns),
+                verify=verify,
             )
     # Rebuild the page from the new state (answer, question widget, input state).
     st.rerun()
