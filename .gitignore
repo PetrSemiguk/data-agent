@@ -23,6 +23,7 @@ uploads/
 # Agent artifacts
 outputs/
 logs/
+memory/
 *.db
 *.sqlite
 

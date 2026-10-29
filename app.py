@@ -38,6 +38,7 @@ from agent.events import (
     VerifierEvent,
 )
 from agent.loop import HistoryTurn, RunResult, action_record, create_client, resume_agent, run_agent
+from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint
 from agent.sandbox import Sandbox
 from agent.tools import plan_summary
 from agent.verifier import VerificationReport
@@ -52,6 +53,7 @@ TOOL_ICONS = {
     "run_code": ":material/code:",
     "save_chart": ":material/bar_chart:",
     "export_data": ":material/download:",
+    "remember": ":material/bookmark_add:",
     "ask_user": ":material/help:",
     "report_verification": ":material/fact_check:",
 }
@@ -84,6 +86,12 @@ def escape_dollars(text: str) -> str:
 def get_client() -> anthropic.Anthropic:
     """One API client for the whole server process."""
     return create_client()
+
+
+@st.cache_resource
+def get_memory_store() -> MemoryStore:
+    """One memory database for the whole server process."""
+    return MemoryStore()
 
 
 def get_sandbox() -> Sandbox:
@@ -120,7 +128,9 @@ def load_dataset(uploaded: UploadedFile) -> None:
             sandbox.restart()
         sandbox.load_dataframe(path)
         shape = sandbox.execute("df.shape").result or "(0, 0)"
+        fingerprint = dataset_fingerprint(sandbox)
     st.session_state.file_id = uploaded.file_id
+    st.session_state.fingerprint = fingerprint
     st.session_state.dataset_path = path
     st.session_state.shape = ast.literal_eval(shape)
     # A different file means a different conversation.
@@ -369,6 +379,11 @@ def show_result(result: RunResult) -> None:
     if result.final_answer:
         st.markdown(escape_dollars(result.final_answer))
 
+    if result.remembered:
+        st.caption(escape_dollars(":material/bookmark_add: Remembered: " + " · ".join(result.remembered)))
+    if result.memory_not_saved:
+        st.caption(escape_dollars(f":material/warning: {result.memory_not_saved}"))
+
     if result.revised and result.draft_answer is not None:
         with st.expander("Draft answer before verification"):
             st.markdown(escape_dollars(result.draft_answer))
@@ -409,6 +424,25 @@ def verification_badge(report: VerificationReport, revised: bool) -> str:
     else:
         badge = ":red-badge[:material/error: Issues found]"
     return f"{badge} · {claim_counts(report, revised)}"
+
+
+def memory_sidebar(store: MemoryStore, fingerprint: str) -> None:
+    """The dataset's notes with a delete button each, and a button to forget them all."""
+    st.subheader("Memory for this dataset")
+    notes = store.list_notes(fingerprint)
+    if not notes:
+        st.caption("No notes yet. The agent saves lasting facts and your definitions here.")
+    for note in notes:
+        with st.container(border=True):
+            st.markdown(escape_dollars(f"**{note.kind}** · {note.text}"))
+            info, delete = st.columns([3, 1])
+            info.caption(f"#{note.id} · from {note.source} · {note.updated_at[:10]}")
+            if delete.button("Delete", key=f"delete_note_{note.id}", icon=":material/delete:"):
+                store.delete_note(note.id)
+                st.rerun()
+    if st.button("Forget everything about this dataset", disabled=not notes, use_container_width=True):
+        store.forget_dataset(fingerprint)
+        st.rerun()
 
 
 def turn_tokens(turns: list[dict[str, Any]]) -> int:
@@ -492,6 +526,14 @@ with st.sidebar:
         "contradicted claims are sent back to the agent to fix.",
     )
 
+    use_memory = st.toggle(
+        "Use memory",
+        value=True,
+        help="Load this dataset's notes from earlier sessions and let the agent save new ones.",
+    )
+    if uploaded is not None:
+        memory_sidebar(get_memory_store(), st.session_state.fingerprint)
+
     turns: list[dict[str, Any]] = st.session_state.turns
     questions = st.session_state.past_questions + len(turns)
     tokens = st.session_state.past_tokens + turn_tokens(turns)
@@ -568,6 +610,7 @@ if prompt:
                 conversation_id=st.session_state.conversation_id,
                 turn=len(turns),
                 verify=verify,
+                memory=DatasetMemory(get_memory_store(), st.session_state.fingerprint) if use_memory else None,
             )
     # Rebuild the page from the new state (answer, question widget, input state).
     st.rerun()

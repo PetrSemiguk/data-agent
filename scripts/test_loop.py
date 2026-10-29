@@ -3,6 +3,7 @@
 import json
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -42,6 +43,7 @@ from agent.events import (  # noqa: E402
     VerifierEvent,
 )
 from agent.loop import HistoryTurn, RunResult, action_record, build_messages, resume_agent, run_agent  # noqa: E402
+from agent.memory import DatasetMemory, MemoryStore  # noqa: E402
 from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -164,6 +166,7 @@ class FakeClient:
         self.calls = 0
         self.requests: list[list[Any]] = []
         self.systems: list[str] = []
+        self.tools: list[list[str]] = []
         self.messages = self
 
     def stream(self, **kwargs: Any) -> FakeStream:
@@ -171,6 +174,7 @@ class FakeClient:
         # A copy of what the model would see on this call.
         self.requests.append(list(kwargs["messages"]))
         self.systems.append(kwargs["system"])
+        self.tools.append([tool["name"] for tool in kwargs["tools"]])
         reply = self.replies.pop(0) if self.replies else self.repeat
         return FakeStream(reply)
 
@@ -204,6 +208,13 @@ def run(
 def export_use(file_format: str = "csv", block_id: str = "toolu_export") -> Any:
     tool_input = {"variable": "neg", "filename": "negative", "format": file_format, "reason": "Rows to review."}
     return SimpleNamespace(type="tool_use", id=block_id, name="export_data", input=tool_input)
+
+
+NOTE = {"kind": "data_fact", "text": "34,335 rows are full duplicates.", "evidence": "duplicated().sum() = 34335"}
+
+
+def remember_use(block_id: str = "toolu_remember") -> Any:
+    return SimpleNamespace(type="tool_use", id=block_id, name="remember", input=dict(NOTE))
 
 
 def report_use(claims: list[dict[str, str]], block_id: str = "toolu_report") -> Any:
@@ -616,6 +627,95 @@ def main() -> int:
                and "written" not in results[0]["content"] and not Path("out.csv").exists(),
                results[0]["content"].splitlines()[1])
         cleanup(result)
+
+        # Memory: notes from remember are saved only after a fully successful run
+        memory_dir = Path(tempfile.mkdtemp())
+        store = MemoryStore(memory_dir / "memory.db")
+        memory = DatasetMemory(store, "fp_loop")
+
+        # aj) A successful run saves its note; the next run gets it in its first message
+        client = FakeClient([
+            make_response([remember_use()], "tool_use"),
+            make_response([text("Done.")], "end_turn"),
+        ])
+        first = run_agent("Revenue?", sb, client, memory=memory)  # type: ignore[arg-type]
+        saved = store.list_notes("fp_loop")
+        offered = client.tools[0]
+        client = FakeClient([make_response([text("Done.")], "end_turn")])
+        second = run_agent("Next?", sb, client, memory=memory,  # type: ignore[arg-type]
+                           history=[HistoryTurn("Revenue?", "Done.")])
+        first_message = client.requests[0][0]["content"]
+        log = read_log(first)
+        report("aj) note saved, then loaded into the first message",
+               first.remembered == [NOTE["text"]] and len(saved) == 1 and saved[0].source == "agent"
+               and saved[0].evidence == NOTE["evidence"] and saved[0].run_id == Path(first.log_path or "").stem
+               and "remember" in offered and second.memory_loaded == 1
+               and isinstance(first_message, list) and first_message[0]["text"].startswith("[Memory for this dataset")
+               and f"#{saved[0].id} data_fact" in first_message[0]["text"]
+               and first_message[1]["text"] == "Revenue?"
+               and log is not None and log["memory"]["saved"] == [NOTE["text"]],
+               f"saved={[(n.id, n.text) for n in saved]}, next run's first message starts with "
+               f"{first_message[0]['text'].splitlines()[1] if isinstance(first_message, list) else first_message!r}")
+        cleanup(first)
+        cleanup(second)
+
+        # ak) Without memory (--no-memory, toggle off): no block, no remember tool
+        client = FakeClient([make_response([text("Done.")], "end_turn")])
+        result = run_agent("Revenue?", sb, client)  # type: ignore[arg-type]
+        report("ak) memory off -> nothing loaded",
+               client.requests[0][0]["content"] == "Revenue?" and "remember" not in client.tools[0]
+               and result.memory_loaded == 0,
+               f"first message={client.requests[0][0]['content']!r}, tools={client.tools[0]}")
+        cleanup(result)
+
+        # al) An API error drops the run's notes
+        client = FakeClient([
+            make_response([remember_use()], "tool_use"),
+            api_error(anthropic.AuthenticationError, 401, "invalid x-api-key"),
+        ])
+        before = len(store.list_notes("fp_loop"))
+        result = run_agent("Q", sb, client, memory=memory)  # type: ignore[arg-type]
+        log = read_log(result)
+        report("al) api_error -> not saved",
+               result.status == "api_error" and len(store.list_notes("fp_loop")) == before
+               and not result.remembered and "status api_error" in (result.memory_not_saved or "")
+               and log is not None and result.memory_not_saved in log["warnings"]
+               and log["memory"]["not_saved_reason"] == result.memory_not_saved,
+               f"{result.memory_not_saved}")
+        cleanup(result)
+
+        # am) A failed revision drops the run's notes
+        client = FakeClient([
+            make_response([remember_use()], "tool_use"),
+            make_response([text("Revenue is 12.")], "end_turn"),
+            make_response([report_use([CLAIM_BAD])], "tool_use"),
+        ], repeat=make_response([tool_use("1")], "tool_use"))
+        result = run_agent("Q", sb, client, max_steps=3, verify=True, memory=memory)  # type: ignore[arg-type]
+        report("am) revision_failed -> not saved",
+               result.revision_failed and len(store.list_notes("fp_loop")) == before
+               and "could not fix" in (result.memory_not_saved or ""),
+               f"status={result.status}, {result.memory_not_saved}")
+        cleanup(result)
+
+        # an) An answer with a contradicted claim that was not corrected drops the notes
+        agent.loop.MAX_REVISIONS = 0
+        client = FakeClient([
+            make_response([remember_use()], "tool_use"),
+            make_response([text("Revenue is 12.")], "end_turn"),
+            make_response([report_use([CLAIM_BAD])], "tool_use"),
+        ])
+        result = run_agent("Q", sb, client, verify=True, memory=memory)  # type: ignore[arg-type]
+        agent.loop.MAX_REVISIONS = 1
+        report("an) uncorrected contradicted -> not saved",
+               result.status == "completed" and not result.revised
+               and len(store.list_notes("fp_loop")) == before
+               and "not corrected" in (result.memory_not_saved or "")
+               # The verifier (third call) gets neither the memory nor the remember tool.
+               and client.tools[2] == ["get_schema", "run_code", "report_verification"]
+               and "Memory for this dataset" not in str(client.requests[2]),
+               f"status={result.status}, {result.memory_not_saved}; verifier tools={client.tools[2]}")
+        cleanup(result)
+        shutil.rmtree(memory_dir, ignore_errors=True)
 
         # g) A crashing event handler does not break the run
         def broken_handler(event: Event) -> None:

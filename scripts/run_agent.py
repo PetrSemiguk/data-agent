@@ -12,6 +12,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
+from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.tools import ApprovalRequest  # noqa: E402
 
@@ -45,6 +46,11 @@ def main() -> int:
         action="store_true",
         help="Do not fact-check the final answer with the verifier",
     )
+    parser.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="Do not load or save this dataset's memory from earlier sessions",
+    )
     args = parser.parse_args()
     # Symbols such as ✔ may not exist in the console encoding; print '?' instead of failing.
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
@@ -56,6 +62,11 @@ def main() -> int:
 
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
+        memory = None
+        if not args.no_memory:
+            memory = DatasetMemory(MemoryStore(), dataset_fingerprint(sb))
+            count = len(memory.store.list_notes(memory.fingerprint))
+            print(f"Memory: {count} notes loaded for this dataset (fingerprint {memory.fingerprint})")
         result = run_agent(
             args.question,
             sb,
@@ -65,6 +76,7 @@ def main() -> int:
             on_event=ConsolePrinter(),
             verify=False if args.no_verify else None,
             approve_fn=None if args.non_interactive else console_approve,
+            memory=memory,
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
@@ -82,6 +94,10 @@ def main() -> int:
     )
     for path in result.exports:
         print(f"Exported file: {path}")
+    for note in result.remembered:
+        print(f"Remembered: {note}")
+    if result.memory_not_saved:
+        print(f"Memory: {result.memory_not_saved}")
     print(f"Log: {result.log_path}")
     return 0 if result.status == "completed" else 1
 

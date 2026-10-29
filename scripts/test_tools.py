@@ -16,6 +16,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from agent.config import (  # noqa: E402
     MAX_OUTPUT_CHARS,
     MAX_USER_QUESTIONS,
+    MEMORY_MAX_NOTES,
+    MEMORY_NOTE_MAX_CHARS,
     OUTPUT_HEAD_CHARS,
     OUTPUT_TAIL_CHARS,
 )
@@ -106,6 +108,35 @@ def main() -> int:
     answers = [execute_tool("ask_user", question, ctx)[0] for _ in range(MAX_USER_QUESTIONS + 1)]
     report("r) limit reached", answers[-1] == QUESTION_LIMIT_REACHED and len(calls) == MAX_USER_QUESTIONS,
            f"handler called {len(calls)} times; last reply: {answers[-1]}")
+
+    # remember only validates and keeps notes for the end of the run: no sandbox needed
+    def remember_call(note_ids: set[int] | None = None, pending: int = 0, **tool_input: Any) -> tuple[str, bool, ToolContext]:
+        ctx = ToolContext(sandbox=None, memory_note_ids=note_ids if note_ids is not None else set())  # type: ignore[arg-type]
+        ctx.pending_notes = [{"kind": "preference", "text": "x", "evidence": None, "replaces": None}] * pending
+        text, is_error = execute_tool("remember", tool_input, ctx)
+        return text, is_error, ctx
+
+    fact = {"kind": "data_fact", "text": "34,335 rows are full duplicates.", "evidence": "duplicated().sum() = 34335"}
+    bad_notes = {
+        "data_fact without evidence": remember_call(kind="data_fact", text="Many duplicates."),
+        "unknown kind": remember_call(kind="opinion", text="x"),
+        "empty text": remember_call(kind="preference", text=" "),
+        "too long": remember_call(kind="preference", text="x" * (MEMORY_NOTE_MAX_CHARS + 1)),
+        "unknown replaces id": remember_call(note_ids={1, 2}, replaces=7, **fact),
+        "memory full": remember_call(note_ids=set(range(MEMORY_MAX_NOTES - 1)), pending=1, **fact),
+        "memory off": (*execute_tool("remember", fact, ToolContext(sandbox=None)), None),  # type: ignore[arg-type]
+    }
+    report("cc) remember validation", all(r[1] for r in bad_notes.values()),
+           "; ".join(f"{k}: {r[0][:60]}" for k, r in bad_notes.items()))
+
+    text, is_error, ctx = remember_call(**fact)
+    definition = remember_call(note_ids={4}, kind="definition", text="Revenue means net revenue.", replaces=4)
+    full_but_replaces = remember_call(note_ids=set(range(MEMORY_MAX_NOTES)), replaces=3, **fact)
+    report("dd) remember keeps valid notes until the end of the run",
+           not is_error and ctx.pending_notes == [{**fact, "replaces": None}]
+           and not definition[1] and definition[2].pending_notes[0]["replaces"] == 4
+           and not full_but_replaces[1],
+           f"{text} | replaces: {definition[0]} | full memory, replaces=3: {full_but_replaces[0][:40]}")
 
     # update_plan only validates and stores the plan, so no sandbox is needed
     def plan_call(items: Any) -> tuple[str, bool, ToolContext]:

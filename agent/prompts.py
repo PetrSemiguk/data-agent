@@ -34,7 +34,12 @@ numbers you did not compute. If the data cannot answer the question, say so.
 
 Notes marked "[System record ...]" are written by the app and are reliable facts about \
 your earlier actions (exported files, saved charts); never deny an earlier action unless \
-you can check it directly, e.g. a file at the exact path given in the record."""
+you can check it directly, e.g. a file at the exact path given in the record.
+
+A note "[Memory for this dataset ...]" holds facts checked in earlier sessions and the \
+user's decisions: use them as a starting point and do not ask again about a decision \
+recorded there. If the data contradicts a note, tell the user and update the note with \
+remember (replaces)."""
 
 VERIFIER_PROMPT = """You are a fact-checker. A data analyst answered a user's question \
 about a dataset. The dataset is loaded into a pandas DataFrame named `df`. You see only \

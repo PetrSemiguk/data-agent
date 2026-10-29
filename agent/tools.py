@@ -10,12 +10,15 @@ from typing import Any
 
 from agent.config import (
     MAX_APPROVALS,
+    MEMORY_MAX_NOTES,
+    MEMORY_NOTE_MAX_CHARS,
     MAX_OUTPUT_CHARS,
     MAX_USER_QUESTIONS,
     OUTPUT_HEAD_CHARS,
     OUTPUT_TAIL_CHARS,
 )
 from agent.guard import check_code
+from agent.memory import NOTE_KINDS
 from agent.sandbox import Sandbox
 
 # Shows a question (with optional choices) to a human and returns the raw answer.
@@ -40,6 +43,10 @@ class ToolContext:
     plan: list[dict[str, str]] | None = None
     # Separate kernel namespace for run_code and get_schema (the verifier's).
     namespace: str | None = None
+    # Ids of the dataset's notes in memory; None when memory is off for this run.
+    memory_note_ids: set[int] | None = None
+    # Notes from remember calls, saved to memory only when the run succeeds.
+    pending_notes: list[dict[str, Any]] = field(default_factory=list)
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -229,6 +236,35 @@ UPDATE_PLAN_TOOL: dict[str, Any] = {
             },
         },
         "required": ["items"],
+    },
+}
+
+REMEMBER_TOOL: dict[str, Any] = {
+    "name": "remember",
+    "description": (
+        "Save a note to this dataset's memory, for future conversations with this data. "
+        "Remember only lasting facts about the data (e.g. duplicates, cancellations, "
+        "date range, data quality) and definitions or preferences the user stated "
+        "explicitly (e.g. 'revenue means net revenue'). Do not remember answers to "
+        "specific questions. Do not duplicate a note that is already in memory; refine "
+        "it with `replaces`. A data_fact needs evidence: numbers your code printed. "
+        "Notes are saved only if this run finishes successfully."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": list(NOTE_KINDS)},
+            "text": {"type": "string", "description": "One short sentence."},
+            "evidence": {
+                "type": "string",
+                "description": "Required for data_fact: what your code printed, with numbers.",
+            },
+            "replaces": {
+                "type": "integer",
+                "description": "Id of the memory note this one corrects or refines.",
+            },
+        },
+        "required": ["kind", "text"],
     },
 }
 
@@ -703,6 +739,46 @@ def resolve_approval(
     return run_export(request, ctx)
 
 
+
+def remember(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Validate a note and keep it for saving at the end of a successful run."""
+    if ctx.memory_note_ids is None:
+        return "Memory is off for this run; nothing was remembered.", True
+    kind, text = tool_input.get("kind"), tool_input.get("text")
+    evidence, replaces = tool_input.get("evidence"), tool_input.get("replaces")
+    if kind not in NOTE_KINDS:
+        return f"Invalid kind {kind!r}; use one of {', '.join(NOTE_KINDS)}.", True
+    if not isinstance(text, str) or not text.strip():
+        return "Missing required input: text (one short sentence).", True
+    if len(text) > MEMORY_NOTE_MAX_CHARS:
+        return f"The note is too long ({len(text)} chars); keep it under {MEMORY_NOTE_MAX_CHARS}.", True
+    has_evidence = isinstance(evidence, str) and bool(evidence.strip())
+    if kind == "data_fact" and not has_evidence:
+        return "A data_fact needs evidence: the numbers your code printed that show it.", True
+    if replaces is not None and replaces not in ctx.memory_note_ids:
+        known = ", ".join(f"#{i}" for i in sorted(ctx.memory_note_ids)) or "none"
+        return f"There is no memory note #{replaces} for this dataset (notes: {known}).", True
+    # A second note for the same target replaces the first one of this run.
+    ctx.pending_notes = [n for n in ctx.pending_notes if replaces is None or n["replaces"] != replaces]
+    new_notes = sum(n["replaces"] is None for n in ctx.pending_notes)
+    if replaces is None and len(ctx.memory_note_ids) + new_notes >= MEMORY_MAX_NOTES:
+        return (
+            f"Memory is full ({MEMORY_MAX_NOTES} notes for this dataset). "
+            "Refine an existing note with `replaces` instead.",
+            True,
+        )
+    ctx.pending_notes.append(
+        {
+            "kind": kind,
+            "text": text.strip(),
+            "evidence": evidence.strip() if has_evidence else None,
+            "replaces": replaces,
+        }
+    )
+    target = f" (replaces #{replaces})" if replaces is not None else ""
+    return f"Noted{target}. It is saved to memory only if this run finishes successfully.", False
+
+
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -712,6 +788,7 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     SAVE_CHART_TOOL["name"]: save_chart,
     ASK_USER_TOOL["name"]: ask_user,
     REPORT_VERIFICATION_TOOL["name"]: report_verification,
+    REMEMBER_TOOL["name"]: remember,
 }
 
 

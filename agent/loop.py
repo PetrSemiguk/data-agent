@@ -47,11 +47,13 @@ from agent.events import (
     VerificationStarted,
     VerifierEvent,
 )
+from agent.memory import DatasetMemory, MemoryFullError, memory_context
 from agent.prompts import SYSTEM_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
     EXPORT_DATA_TOOL,
+    REMEMBER_TOOL,
     TOOLS,
     UPDATE_PLAN_TOOL,
     ApprovalRequest,
@@ -183,6 +185,13 @@ class AgentState:
     verification_warning: str | None = None
     # The answer before the agent revised it after the verifier's remarks.
     draft_answer: str | None = None
+    # Memory of the dataset (None = off), the ids of the notes shown to the model,
+    # notes from remember calls (saved at the end) and the outcome of saving them.
+    memory: DatasetMemory | None = None
+    memory_note_ids: list[int] = field(default_factory=list)
+    pending_notes: list[dict[str, Any]] = field(default_factory=list)
+    remembered: list[str] = field(default_factory=list)
+    memory_not_saved: str | None = None
 
 
 @dataclass
@@ -223,6 +232,10 @@ class RunResult:
     # The agent could not finish its revision: final_answer is the unrevised draft.
     revision_failed: bool = False
     verification_warning: str | None = None
+    # Memory: notes shown to the model, notes saved by this run, or why none were saved.
+    memory_loaded: int = 0
+    remembered: list[str] = field(default_factory=list)
+    memory_not_saved: str | None = None
 
 
 def create_client() -> anthropic.Anthropic:
@@ -245,6 +258,7 @@ def run_agent(
     turn: int | None = None,
     verify: bool | None = None,
     approve_fn: ApproveFn | None = None,
+    memory: DatasetMemory | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -265,13 +279,18 @@ def run_agent(
     `on_event` receives progress events; the loop itself prints nothing.
     API errors do not raise: they end the run with status "api_error".
 
+    With `memory`, the dataset's notes from earlier sessions are put into the
+    first user message and the agent gets the remember tool; its new notes are
+    saved only if the run succeeds.
+
     With `verify` (default VERIFY_ANSWERS), a final answer that contains numbers
     is checked by the verifier; if it contradicts claims, the agent gets the
     remarks and revises the answer within the same run and limits.
     """
     emit = safe_emitter(on_event)
+    notes = memory.store.list_notes(memory.fingerprint) if memory else []
     state = new_state(
-        build_messages(question, history),
+        build_messages(question, history, memory_context(notes)),
         model,
         max_steps,
         {
@@ -280,9 +299,16 @@ def run_agent(
             "history_turns_sent": len((history or [])[-MAX_HISTORY_TURNS:]),
             "dataset_file": dataset_file,
             "question": question,
+            "memory": {
+                "fingerprint": memory.fingerprint,
+                "loaded": [note.id for note in notes],
+            } if memory else None,
         },
         question=question,
         verify=VERIFY_ANSWERS if verify is None else verify,
+        tools=[*TOOLS, REMEMBER_TOOL] if memory else TOOLS,
+        memory=memory,
+        memory_note_ids=[note.id for note in notes],
     )
     assert state.output_dir is not None
     emit(RunStarted(run_id=state.run_id, output_dir=state.output_dir.as_posix(), log_path=state.log_path.as_posix()))
@@ -340,7 +366,9 @@ def new_state(
 
 
 def build_messages(
-    question: str, history: list[HistoryTurn] | list[tuple[str, str]] | None
+    question: str,
+    history: list[HistoryTurn] | list[tuple[str, str]] | None,
+    memory_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Start the conversation: recent chat turns as plain messages, then the question.
 
@@ -348,6 +376,8 @@ def build_messages(
     the system prompt, so the system prompt stays the same for every run.
     The record of an answer's actions goes into the NEXT user message: it comes
     from the app, so it is never put into the model's own words.
+    The dataset's memory goes into the FIRST user message, so in a chat it stays
+    at the start of the conversation on every turn.
     """
     recent = [HistoryTurn(*turn) for turn in (history or [])[-MAX_HISTORY_TURNS:]]
     messages: list[dict[str, Any]] = []
@@ -358,12 +388,16 @@ def build_messages(
         previous_record = turn.record
     if not recent:
         messages.append({"role": "user", "content": question})
-        return messages
-    content = [{"type": "text", "text": CONTINUATION_NOTE}]
-    if previous_record:
-        content.append({"type": "text", "text": previous_record})
-    content.append({"type": "text", "text": question})
-    messages.append({"role": "user", "content": content})
+    else:
+        content = [{"type": "text", "text": CONTINUATION_NOTE}]
+        if previous_record:
+            content.append({"type": "text", "text": previous_record})
+        content.append({"type": "text", "text": question})
+        messages.append({"role": "user", "content": content})
+    if memory_text:
+        first = messages[0]["content"]
+        blocks = [{"type": "text", "text": first}] if isinstance(first, str) else first
+        messages[0] = {"role": "user", "content": [{"type": "text", "text": memory_text}, *blocks]}
     return messages
 
 
@@ -505,6 +539,8 @@ def continue_run(
         approvals_requested=state.approvals_requested,
         plan=state.plan,
         namespace=state.namespace,
+        memory_note_ids=set(state.memory_note_ids) if state.memory else None,
+        pending_notes=state.pending_notes,
     )
     step_logs: list[dict[str, Any]] = state.log["steps"]
 
@@ -691,6 +727,7 @@ def continue_run(
     finally:
         state.questions_asked = ctx.questions_asked
         state.approvals_requested = ctx.approvals_requested
+        state.pending_notes = ctx.pending_notes
         state.plan = ctx.plan
         state.active_seconds += time.perf_counter() - segment_start
         if state.output_dir is not None:
@@ -718,6 +755,17 @@ def continue_run(
             state.verification_warning = REVISION_FAILED_WARNING
         if state.verification_warning:
             warnings.append(state.verification_warning)
+        if status != "waiting_for_user":
+            save_memory(state, status, revision_failed)
+        if state.memory_not_saved:
+            warnings.append(state.memory_not_saved)
+        if state.memory is not None:
+            state.log["memory"] = {
+                **(state.log.get("memory") or {}),
+                "remember_calls": state.pending_notes,
+                "saved": state.remembered,
+                "not_saved_reason": state.memory_not_saved,
+            }
         # Totals include the verifier's run; its own share is listed separately.
         verify_in = report.input_tokens if report else 0
         verify_out = report.output_tokens if report else 0
@@ -769,6 +817,9 @@ def continue_run(
             state=state if pending_now else None,
             exports=list(state.exports),
             actions=list(state.actions),
+            memory_loaded=len(state.memory_note_ids),
+            remembered=list(state.remembered),
+            memory_not_saved=state.memory_not_saved,
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
             verification=report,
@@ -786,6 +837,48 @@ def continue_run(
         )
 
     return result
+
+
+def save_memory(state: AgentState, status: RunStatus, revision_failed: bool) -> None:
+    """Save the run's remember notes, but only after a fully successful answer.
+
+    Notes from a run that failed, or whose answer still has contradicted
+    claims, may rest on wrong numbers, so they are dropped with a reason.
+    """
+    if state.memory is None or not state.pending_notes:
+        return
+    report = state.verification
+    revised = status == "completed" and state.draft_answer is not None
+    reason = None
+    if revision_failed:
+        reason = "the answer has errors the agent could not fix"
+    elif status != "completed":
+        reason = f"the run ended with status {status}"
+    elif report is not None and report.status == "issues_found" and not revised:
+        reason = "the verifier contradicted the answer and it was not corrected"
+    if reason:
+        state.memory_not_saved = f"{len(state.pending_notes)} memory notes were not saved: {reason}."
+        return
+    memory = state.memory
+    for note in state.pending_notes:
+        # Facts about the data come from the agent; definitions and preferences from the user.
+        source = "agent" if note["kind"] == "data_fact" else "user"
+        fields = (memory.fingerprint, note["kind"], note["text"], note["evidence"], source, state.run_id)
+        try:
+            if note["replaces"] is not None:
+                saved = memory.store.replace_note(note["replaces"], *fields)
+            else:
+                memory.store.add_note(*fields)
+                saved = True
+        except MemoryFullError:
+            saved = False
+        if saved:
+            state.remembered.append(note["text"])
+    if len(state.remembered) < len(state.pending_notes):
+        state.memory_not_saved = (
+            f"{len(state.pending_notes) - len(state.remembered)} memory notes were not saved: "
+            "memory is full or the note to replace was deleted."
+        )
 
 
 def needs_verification(state: AgentState, answer: str) -> bool:

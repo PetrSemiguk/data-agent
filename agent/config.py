@@ -35,6 +35,13 @@ VERIFY_MAX_STEPS = 6
 VERIFY_ANSWERS = True  # check final answers that contain numbers
 MAX_REVISIONS = 1  # times the agent may fix an answer the verifier contradicted
 
+# Memory between sessions, per dataset (SQLite)
+MEMORY_DB = "memory/agent_memory.db"
+MEMORY_MAX_NOTES = 20  # notes kept per dataset
+MEMORY_MAX_CHARS = 2000  # memory text added to the model's context
+MEMORY_NOTE_MAX_CHARS = 300  # one note: a short sentence
+FINGERPRINT_SAMPLE_ROWS = 100  # first and last rows hashed into the dataset fingerprint
+
 # Claude API client; the SDK itself retries 408/409/429/5xx and connection errors
 API_MAX_RETRIES = 4
 API_TIMEOUT_SECONDS = 120
