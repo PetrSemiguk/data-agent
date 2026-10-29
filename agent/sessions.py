@@ -27,6 +27,7 @@ from agent.sandbox import Sandbox
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 UPLOADS_ROOT = PROJECT_ROOT / "uploads"
+DEMO_DIR = PROJECT_ROOT / "demo"
 # The folders that get one subfolder per session.
 SESSION_ROOTS = (UPLOADS_ROOT, PROJECT_ROOT / OUTPUTS_DIR, PROJECT_ROOT / LOGS_DIR)
 SESSION_PREFIX = "session_"
@@ -49,11 +50,14 @@ class SessionDirs:
 
 
 def session_dirs(session_id: str | None) -> SessionDirs:
-    """The session's own folders, or the shared ones for None (local mode)."""
+    """The session's own folders, or the shared ones for None (local mode).
+
+    A session's code may read only its own uploads and the demo dataset.
+    """
     if session_id is None:
         return SessionDirs(UPLOADS_ROOT, RunDirs())
     uploads, outputs, logs = (root / session_id for root in SESSION_ROOTS)
-    return SessionDirs(uploads, RunDirs(outputs=outputs, logs=logs))
+    return SessionDirs(uploads, RunDirs(outputs=outputs, logs=logs, readable=(uploads, DEMO_DIR)))
 
 
 def last_activity(folder: Path) -> float:

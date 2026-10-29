@@ -87,14 +87,16 @@ HAS_DIGIT = re.compile(r"\d")
 
 @dataclass(frozen=True)
 class RunDirs:
-    """Where runs save their output folders and logs.
+    """Where runs save their output folders and logs, and which folders code may read.
 
-    The defaults are the project's outputs/ and logs/runs/; in public mode each
-    session passes folders of its own.
+    The defaults are the project's outputs/, logs/runs/ and the guard's READABLE_DIRS;
+    in public mode each session passes folders of its own.
     """
 
     outputs: Path = PROJECT_ROOT / OUTPUTS_DIR
     logs: Path = PROJECT_ROOT / LOGS_DIR
+    # None: the guard's default READABLE_DIRS.
+    readable: tuple[Path, ...] | None = None
 REVISION_FAILED_WARNING = (
     "Verification found errors that the agent could not fix. "
     "Showing the original draft — see the issues below."
@@ -610,6 +612,7 @@ def continue_run(
         pending_notes=state.pending_notes,
         skills=state.skills,
         loaded_skills=state.loaded_skills,
+        readable_dirs=state.dirs.readable,
     )
     step_logs: list[dict[str, Any]] = state.log["steps"]
 

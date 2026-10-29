@@ -12,6 +12,7 @@ Docker container (stage 6).
 
 import ast
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 from agent.config import READABLE_DIRS
@@ -88,16 +89,18 @@ IN_MEMORY_BUFFERS = {"io.StringIO", "io.BytesIO", "StringIO", "BytesIO"}
 MAX_REPORTED = 3
 
 
-def check_code(code: str) -> str | None:
+def check_code(code: str, readable_dirs: Iterable[Path] | None = None) -> str | None:
     """Return an error message if the code uses a blocked operation, else None.
 
-    Code with a syntax error passes: running it shows the real SyntaxError.
+    Files may be read only inside `readable_dirs` (default: READABLE_DIRS of the
+    project). Code with a syntax error passes: running it shows the real SyntaxError.
     """
+    allowed = ALLOWED_READ_DIRS if readable_dirs is None else tuple(Path(d).resolve() for d in readable_dirs)
     try:
         tree = ast.parse(code)
     except SyntaxError:
         return None
-    problems = _find_problems(tree)
+    problems = _find_problems(tree, allowed)
     if not problems:
         return None
     lines = [f"- line {line}: {what}" for line, what, _ in problems[:MAX_REPORTED]]
@@ -107,7 +110,7 @@ def check_code(code: str) -> str | None:
     return "Blocked before running, nothing was executed:\n" + "\n".join(lines) + "\n" + " ".join(hints)
 
 
-def _find_problems(tree: ast.Module) -> list[tuple[int, str, str]]:
+def _find_problems(tree: ast.Module, allowed: tuple[Path, ...]) -> list[tuple[int, str, str]]:
     aliases = _import_aliases(tree)
     problems: list[tuple[int, str, str]] = []
     for node in ast.walk(tree):
@@ -118,7 +121,7 @@ def _find_problems(tree: ast.Module) -> list[tuple[int, str, str]]:
                 if root in BLOCKED_MODULES:
                     problems.append((node.lineno, f"import {name} ({BLOCKED_MODULES[root]})", HINT_OTHER))
         elif isinstance(node, ast.Call):
-            problem = _check_call(node, aliases)
+            problem = _check_call(node, aliases, allowed)
             if problem:
                 problems.append((node.lineno, *problem))
     return sorted(problems)
@@ -152,7 +155,7 @@ def _dotted_name(node: ast.expr, aliases: dict[str, str]) -> str | None:
     return ".".join(reversed(parts))
 
 
-def _check_call(node: ast.Call, aliases: dict[str, str]) -> tuple[str, str] | None:
+def _check_call(node: ast.Call, aliases: dict[str, str], allowed: tuple[Path, ...]) -> tuple[str, str] | None:
     name = _dotted_name(node.func, aliases)
     if name in BLOCKED_CALLS:
         what = BLOCKED_CALLS[name]
@@ -165,7 +168,7 @@ def _check_call(node: ast.Call, aliases: dict[str, str]) -> tuple[str, str] | No
         if mode is None or WRITE_MODE.search(mode):
             return f"open(..., mode={mode!r}) writes a file", HINT_EXPORT
 
-    read = _check_read(node, name, aliases)
+    read = _check_read(node, name, aliases, allowed)
     if read:
         return read, HINT_READ
 
@@ -186,7 +189,7 @@ def _check_call(node: ast.Call, aliases: dict[str, str]) -> tuple[str, str] | No
     return None
 
 
-def _check_read(node: ast.Call, name: str | None, aliases: dict[str, str]) -> str | None:
+def _check_read(node: ast.Call, name: str | None, aliases: dict[str, str], allowed: tuple[Path, ...]) -> str | None:
     """A problem if the call reads a file outside the allowed folders or lists folders."""
     called = name or (node.func.attr if isinstance(node.func, ast.Attribute) else "")
     if called.split(".")[-1] in BROWSE_CALLS:
@@ -215,7 +218,7 @@ def _check_read(node: ast.Call, name: str | None, aliases: dict[str, str]) -> st
         return None
     if path is None:
         return f"{called}() reads a file whose path is built at run time"
-    if not _readable(path):
+    if not _readable(path, allowed):
         return f"{called}({path!r}) reads outside the dataset folder"
     return None
 
@@ -255,11 +258,11 @@ def _static_path(node: ast.expr, aliases: dict[str, str]) -> str | None:
     return None
 
 
-def _readable(path: str) -> bool:
-    """True if the normalized path is inside one of READABLE_DIRS of the project."""
+def _readable(path: str, allowed: tuple[Path, ...]) -> bool:
+    """True if the normalized path is inside one of the allowed folders."""
     candidate = Path(path).expanduser()
     resolved = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
-    return any(resolved == folder or folder in resolved.parents for folder in ALLOWED_READ_DIRS)
+    return any(resolved == folder or folder in resolved.parents for folder in allowed)
 
 
 def _mode_argument(node: ast.Call, position: int) -> str | None:

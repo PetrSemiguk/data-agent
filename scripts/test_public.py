@@ -19,7 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent import sessions  # noqa: E402
-from agent.events import Event  # noqa: E402
+from agent.events import Event, ToolResult  # noqa: E402
+from agent.guard import check_code  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.mode import LOCAL, MODE_VARIABLE, PUBLIC, get_mode, load_server_environment  # noqa: E402
 from agent.redact import MASK, SecretFilter, mask_secrets  # noqa: E402
@@ -164,6 +165,54 @@ def test_session_isolation(sb: Sandbox) -> None:
                own and a_files and b_files and not (a_files & b_files) and not overlap and after == before,
                f"A files={len(a_files)}, B files={len(b_files)}, common={len(a_files & b_files)}; "
                f"logs in each session's folder: {own}; new files in shared logs/runs: {len(after - before)}")
+    finally:
+        remove_session(a)
+        remove_session(b)
+
+
+def test_guard_reads_per_session() -> None:
+    a, b = session_dirs(sessions.new_session_id()), session_dirs(sessions.new_session_id())
+    readable = a.runs.readable
+
+    def blocked(path: Path | str) -> bool:
+        return check_code(f"pd.read_csv({str(path)!r})", readable) is not None
+
+    cases = {
+        "own upload": blocked(a.uploads / "sales.csv"),
+        "demo": blocked(DEMO_FILE),
+        "other session": blocked(b.uploads / "sales.csv"),
+        "uploads root": blocked(sessions.UPLOADS_ROOT / "x.csv"),
+        "data/": blocked(PROJECT_ROOT / "data" / "Titanic-Dataset.csv"),
+        "relative data/": blocked("data/Titanic-Dataset.csv"),
+        "escape with ..": blocked(a.uploads / ".." / b.uploads.name / "sales.csv"),
+    }
+    local = check_code("pd.read_csv('data/Titanic-Dataset.csv')") is None and session_dirs(None).runs.readable is None
+    expected = {"own upload": False, "demo": False, "other session": True, "uploads root": True,
+                "data/": True, "relative data/": True, "escape with ..": True}
+    report("q) guard in public: reads only the own session folder and demo/; local unchanged",
+           cases == expected and local,
+           f"blocked: {cases}; local mode reads data/: {local}")
+
+
+def test_session_cannot_read_other(sb: Sandbox) -> None:
+    a, b = sessions.new_session_id(), sessions.new_session_id()
+    secret = "B-ONLY-CONTENT-42"
+    other_file = session_dirs(b).uploads / "private.csv"
+    other_file.parent.mkdir(parents=True, exist_ok=True)
+    other_file.write_text(f"col\n{secret}\n", encoding="utf-8")
+    client = FakeClient([
+        make_response([tool_use(f"print(pd.read_csv({str(other_file)!r}))")], "tool_use"),
+        make_response([text("Could not read it.")], "end_turn"),
+    ])
+    events: list[Event] = []
+    try:
+        fake_run(sb, a, client, events)
+        output = next((e.output for e in events if isinstance(e, ToolResult)), "")
+        report("r) session A's code cannot read session B's upload (guard blocks it)",
+               output.startswith("Blocked before running") and "reads outside the dataset folder" in output
+               and secret not in repr(client.requests),
+               f"tool result: {output.splitlines()[1] if output else '-'}; B's content reached the model: "
+               f"{secret in repr(client.requests)}")
     finally:
         remove_session(a)
         remove_session(b)
@@ -404,6 +453,8 @@ def main() -> int:
         with Sandbox() as sb:
             test_key_never_saved(sb)
             test_session_isolation(sb)
+            test_session_cannot_read_other(sb)
+        test_guard_reads_per_session()
         test_cleanup()
         test_upload_limit()
         test_session_limit()

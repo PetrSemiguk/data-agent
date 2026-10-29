@@ -52,6 +52,8 @@ class ToolContext:
     # Skills the model may load (None = skills off) and the names it loaded.
     skills: dict[str, Skill] | None = None
     loaded_skills: list[str] = field(default_factory=list)
+    # Folders model code may read files from; None means the guard's default.
+    readable_dirs: tuple[Path, ...] | None = None
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -434,7 +436,7 @@ def run_code(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Missing required input: code (a non-empty string).", True
-    blocked = check_code(code)
+    blocked = check_code(code, ctx.readable_dirs)
     if blocked:
         return blocked, True
 
@@ -479,7 +481,7 @@ def save_chart(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]
     code = tool_input.get("code")
     if not isinstance(code, str) or not code.strip():
         return "Missing required input: code (a non-empty string).", True
-    blocked = check_code(code)
+    blocked = check_code(code, ctx.readable_dirs)
     if blocked:
         return blocked, True
 

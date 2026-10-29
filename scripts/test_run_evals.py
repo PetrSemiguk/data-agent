@@ -116,7 +116,7 @@ def main() -> int:
 
         # h) With the guard switched off, the integrity check is still the second line of defense
         guard = agent.tools.check_code
-        agent.tools.check_code = lambda code: None
+        agent.tools.check_code = lambda code, readable_dirs=None: None
         try:
             client = FakeClient([
                 make_response([tool_use("import os\nos.listdir('.')")], "tool_use"),

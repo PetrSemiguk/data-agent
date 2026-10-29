@@ -38,6 +38,14 @@ read-only, and the analysis kernel gets no API key or other secrets.
 (deleted after 2 hours of inactivity), uploads are limited to 50 MB and at most 3
 sessions run a kernel at once. Limits are in `agent/config.py`.
 
+**Security.** Sessions are isolated from the agent's mistakes: its code may read only
+the current session's uploads and `demo/`, and the code check blocks everything else.
+They are not isolated from a deliberate attempt to get around that check: all
+sessions share one container and one user, so such code could read other visitors'
+files. Full isolation would need a container per session, and the app would need
+access to the Docker API to start them, which is a risk of its own. So the page asks
+visitors not to upload confidential data.
+
 ## Demo dataset
 
 `demo/demo_sales.csv` is synthetic sales data made by `scripts/make_demo_data.py`
