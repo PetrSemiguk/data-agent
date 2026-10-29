@@ -1,0 +1,37 @@
+# Public mode: every visitor enters their own API key in the page.
+# Run with: docker compose -f docker-compose.public.yml up -d
+# A separate project name keeps its containers and volumes apart from the local setup.
+name: data-agent-public
+
+services:
+  app:
+    build: .
+    image: data-agent
+    # No env_file: the server has no API key at all.
+    environment:
+      DATA_AGENT_MODE: public
+      # Visitors see only the type of an unexpected error, not its message or traceback.
+      STREAMLIT_CLIENT_SHOW_ERROR_DETAILS: type
+    ports:
+      # Reachable only from this computer until the deploy step.
+      - "127.0.0.1:8501:8501"
+    # No data/ mount: visitors use their own files or the demo dataset in the image.
+    volumes:
+      - uploads:/app/uploads
+      - outputs:/app/outputs
+      - logs:/app/logs
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    # Up to MAX_ACTIVE_SESSIONS (3) kernels, each 150-450 MiB with a dataset loaded,
+    # plus uploads (up to 50 MB each) held by the app process.
+    mem_limit: 3g
+    cpus: 2
+    # Measured under 40 processes with one kernel; 3 kernels stay well below 256.
+    pids_limit: 256
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  outputs:
+  logs:

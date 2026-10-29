@@ -256,7 +256,7 @@ def _static_path(node: ast.expr, aliases: dict[str, str]) -> str | None:
 
 
 def _readable(path: str) -> bool:
-    """True if the normalized path is inside data/ or uploads/ of the project."""
+    """True if the normalized path is inside one of READABLE_DIRS of the project."""
     candidate = Path(path).expanduser()
     resolved = (candidate if candidate.is_absolute() else PROJECT_ROOT / candidate).resolve()
     return any(resolved == folder or folder in resolved.parents for folder in ALLOWED_READ_DIRS)

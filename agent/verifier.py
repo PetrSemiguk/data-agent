@@ -8,7 +8,7 @@ import anthropic
 
 from agent.config import VERIFY_MAX_STEPS
 from agent.events import EventHandler
-from agent.loop import continue_run, new_state, safe_emitter, write_log
+from agent.loop import RunDirs, continue_run, new_state, safe_emitter, write_log
 from agent.prompts import VERIFIER_PROMPT
 from agent.sandbox import Sandbox
 from agent.tools import CLAIM_STATUSES, GET_SCHEMA_TOOL, REPORT_VERIFICATION_TOOL, RUN_CODE_TOOL
@@ -110,6 +110,7 @@ def verify_answer(
     on_event: EventHandler | None = None,
     notes: list[dict[str, Any]] | None = None,
     cache: bool = True,
+    dirs: RunDirs | None = None,
 ) -> VerificationReport:
     """Recompute the claims of `answer` with code in a fresh model context.
 
@@ -131,6 +132,7 @@ def verify_answer(
         finish_tool=REPORT_VERIFICATION_TOOL["name"],
         namespace=VERIFIER_NAMESPACE,
         cache=cache,
+        dirs=dirs,
     )
     try:
         result = continue_run(state, sandbox, client, safe_emitter(on_event), None, pause_on_ask=False)

@@ -18,6 +18,7 @@ from agent.config import (
     OUTPUT_TAIL_CHARS,
 )
 from agent.guard import check_code
+from agent.redact import mask_secrets
 from agent.memory import NOTE_KINDS
 from agent.skills_loader import Skill
 from agent.sandbox import Sandbox
@@ -854,4 +855,6 @@ def execute_tool(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> tup
         return f"Unknown tool: {name}. Available tools: {available}.", True
 
     text, is_error = handler(tool_input, ctx)
+    # Whatever the code printed, an API key never reaches the model, the log or the page.
+    text = mask_secrets(text)
     return (text if name in NOT_TRUNCATED else truncate_output(text)), is_error

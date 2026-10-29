@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
@@ -52,6 +52,7 @@ from agent.events import (
 )
 from agent.memory import DatasetMemory, MemoryFullError, memory_context
 from agent.prompts import SKILLS_PROMPT, SYSTEM_PROMPT
+from agent.redact import SecretFilter, mask_secrets
 from agent.skills_loader import Skill, skills_list
 from agent.usage import add_costs, request_cost, usage_counts
 from agent.sandbox import Sandbox
@@ -79,7 +80,21 @@ if TYPE_CHECKING:
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
+# Exceptions can quote request details; keys never reach the console.
+logger.addFilter(SecretFilter())
 HAS_DIGIT = re.compile(r"\d")
+
+
+@dataclass(frozen=True)
+class RunDirs:
+    """Where runs save their output folders and logs.
+
+    The defaults are the project's outputs/ and logs/runs/; in public mode each
+    session passes folders of its own.
+    """
+
+    outputs: Path = PROJECT_ROOT / OUTPUTS_DIR
+    logs: Path = PROJECT_ROOT / LOGS_DIR
 REVISION_FAILED_WARNING = (
     "Verification found errors that the agent could not fix. "
     "Showing the original draft — see the issues below."
@@ -210,6 +225,8 @@ class AgentState:
     # Skills offered to the model (None = off) and the names it loaded, in order.
     skills: dict[str, Skill] | None = None
     loaded_skills: list[str] = field(default_factory=list)
+    # Folders of this run; the verifier writes its log next to the agent's.
+    dirs: RunDirs = field(default_factory=RunDirs)
 
 
 @dataclass
@@ -264,9 +281,12 @@ class RunResult:
     loaded_skills: list[str] = field(default_factory=list)
 
 
-def create_client() -> anthropic.Anthropic:
-    """Claude API client; the SDK retries rate limits, 5xx and network errors itself."""
-    return anthropic.Anthropic(max_retries=API_MAX_RETRIES, timeout=API_TIMEOUT_SECONDS)
+def create_client(api_key: str | None = None) -> anthropic.Anthropic:
+    """Claude API client; the SDK retries rate limits, 5xx and network errors itself.
+
+    Without `api_key` the SDK reads ANTHROPIC_API_KEY from the environment.
+    """
+    return anthropic.Anthropic(api_key=api_key, max_retries=API_MAX_RETRIES, timeout=API_TIMEOUT_SECONDS)
 
 
 def run_agent(
@@ -288,6 +308,7 @@ def run_agent(
     skills: dict[str, Skill] | None = None,
     cache: bool | None = None,
     verifier_model: str | None = None,
+    dirs: RunDirs | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -321,6 +342,8 @@ def run_agent(
     With `verify` (default VERIFY_ANSWERS), a final answer that contains numbers
     is checked by the verifier; if it contradicts claims, the agent gets the
     remarks and revises the answer within the same run and limits.
+
+    `dirs` sets where the output folder and the log go (default RunDirs()).
     """
     emit = safe_emitter(on_event)
     notes = memory.store.list_notes(memory.fingerprint) if memory else []
@@ -349,6 +372,7 @@ def run_agent(
         verifier_model=verifier_model or VERIFIER_MODEL,
         memory=memory,
         memory_note_ids=[note.id for note in notes],
+        dirs=dirs,
     )
     assert state.output_dir is not None
     emit(RunStarted(run_id=state.run_id, output_dir=state.output_dir.as_posix(), log_path=state.log_path.as_posix()))
@@ -361,6 +385,7 @@ def new_state(
     max_steps: int,
     log_fields: dict[str, Any],
     log_suffix: str | None = None,
+    dirs: RunDirs | None = None,
     **settings: Any,
 ) -> AgentState:
     """Create the run folder, the log file and the state of a new run.
@@ -368,16 +393,17 @@ def new_state(
     `log_fields` are extra keys for the log; `settings` are other AgentState
     fields (the verifier passes its system prompt, tools and finish tool).
     A run with `log_suffix` gets no output folder, only the log file
-    logs/runs/<timestamp><log_suffix>.json.
+    logs/runs/<timestamp><log_suffix>.json. `dirs` replaces outputs/ and logs/runs/.
     """
+    dirs = dirs or RunDirs()
     run_dir: Path | None = None
     if log_suffix is None:
         # Every run saves its files (charts) and its log under the same run id.
-        run_dir = create_run_dir()
-        log_path = PROJECT_ROOT / LOGS_DIR / f"{run_dir.name}.json"
+        run_dir = create_run_dir(dirs.outputs)
+        log_path = dirs.logs / f"{run_dir.name}.json"
         log_path.parent.mkdir(parents=True, exist_ok=True)
     else:
-        log_path = create_unique(PROJECT_ROOT / LOGS_DIR, f"{log_suffix}.json", create_empty_file)
+        log_path = create_unique(dirs.logs, f"{log_suffix}.json", create_empty_file)
     run_id = log_path.stem
     state = AgentState(
         run_id=run_id,
@@ -399,6 +425,7 @@ def new_state(
             "charts": [],
             "steps": [],
         },
+        dirs=dirs,
         **settings,
     )
     write_log(log_path, state.log)
@@ -879,8 +906,8 @@ def continue_run(
         pending_now = state.pending if status == "waiting_for_user" else None
         result = RunResult(
             status=status,
-            final_answer=final_answer,
-            error_message=error_message,
+            final_answer=mask_secrets(final_answer) if final_answer else final_answer,
+            error_message=mask_secrets(error_message) if error_message else error_message,
             steps=len(step_logs),
             input_tokens=state.input_tokens + verify_in,
             output_tokens=state.output_tokens + verify_out,
@@ -1031,12 +1058,15 @@ def verify_final_answer(
             on_event=lambda event: emit(VerifierEvent(event=event)),
             notes=facts,
             cache=state.cache,
+            dirs=state.dirs,
         )
         for note, check in zip(facts, report.note_checks):
             note["check"] = {"status": check.status, "evidence": check.evidence, "correction": check.correction}
     except Exception as exc:
         logger.exception("Verification crashed")
-        state.verification_warning = f"Verification failed ({type(exc).__name__}: {exc}); the answer was not checked."
+        state.verification_warning = mask_secrets(
+            f"Verification failed ({type(exc).__name__}: {exc}); the answer was not checked."
+        )
     else:
         state.verification = report
         if report.status == "incomplete":
@@ -1084,11 +1114,23 @@ def safe_emitter(on_event: EventHandler | None) -> EventHandler:
         if on_event is None:
             return
         try:
-            on_event(event)
+            on_event(masked_event(event))
         except Exception:
             logger.exception("Event handler failed on %s", type(event).__name__)
 
     return emit
+
+
+def masked_event(event: Event) -> Event:
+    """The event with API keys masked in its text fields (an inner event too)."""
+    changes: dict[str, Any] = {}
+    for item in fields(event):
+        value = getattr(event, item.name)
+        if isinstance(value, str) and mask_secrets(value) != value:
+            changes[item.name] = mask_secrets(value)
+        elif is_dataclass(value) and not isinstance(value, type) and item.name == "event":
+            changes[item.name] = masked_event(value)
+    return replace(event, **changes) if changes else event
 
 
 def stream_message(
@@ -1150,9 +1192,9 @@ def stream_message(
     raise AssertionError("unreachable")
 
 
-def create_run_dir() -> Path:
-    """Create outputs/<timestamp>/, adding a suffix if that run id is taken."""
-    return create_unique(PROJECT_ROOT / OUTPUTS_DIR, "", Path.mkdir)
+def create_run_dir(root: Path = PROJECT_ROOT / OUTPUTS_DIR) -> Path:
+    """Create <root>/<timestamp>/, adding a suffix if that run id is taken."""
+    return create_unique(root, "", Path.mkdir)
 
 
 def create_empty_file(path: Path) -> None:
@@ -1175,8 +1217,9 @@ def create_unique(root: Path, ending: str, create: Callable[[Path], None]) -> Pa
 
 
 def write_log(path: Path, log: dict[str, Any]) -> None:
-    """Write the run log as readable JSON."""
-    path.write_text(json.dumps(log, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    """Write the run log as readable JSON, with API keys masked."""
+    text = json.dumps(log, ensure_ascii=False, indent=2, default=str)
+    path.write_text(mask_secrets(text), encoding="utf-8")
 
 
 def is_transient_api_error(exc: Exception) -> bool:
@@ -1202,7 +1245,7 @@ def describe_api_error(exc: Exception, model: str) -> str:
         return f"Anthropic API error during the response ({exc.type}){when}: {detail}"
     # Permanent errors: retrying cannot help.
     if isinstance(exc, anthropic.AuthenticationError):
-        return "Authentication failed: check ANTHROPIC_API_KEY in .env."
+        return "Authentication failed: the API key was rejected (invalid, revoked or disabled)."
     if isinstance(exc, anthropic.PermissionDeniedError):
         return f"Permission denied: this API key cannot use model '{model}'. {detail}"
     if isinstance(exc, anthropic.NotFoundError):
@@ -1220,7 +1263,7 @@ def describe_api_error(exc: Exception, model: str) -> str:
         return f"Could not connect to the Anthropic API {retried}: check your network."
     if isinstance(exc, anthropic.APIStatusError):
         return f"API error (HTTP {exc.status_code}): {detail}"
-    return f"API client error: {exc}"
+    return mask_secrets(f"API client error: {exc}")
 
 
 def api_error_detail(exc: Exception) -> str:

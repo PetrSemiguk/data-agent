@@ -8,8 +8,8 @@ OUTPUT_TAIL_CHARS = 1000
 # Sandbox
 CODE_TIMEOUT_SECONDS = 30
 # The only project folders model code may read files from: the datasets
-# (data/) and files uploaded in the web app (uploads/).
-READABLE_DIRS = ("data", "uploads")
+# (data/), files uploaded in the web app (uploads/) and the demo dataset (demo/).
+READABLE_DIRS = ("data", "uploads", "demo")
 PANDAS_DISPLAY_OPTIONS: dict[str, int] = {
     "display.max_rows": 50,
     "display.max_columns": 30,
@@ -80,3 +80,20 @@ API_TIMEOUT_SECONDS = 120
 
 # JSON run logs, one file per run
 LOGS_DIR = "logs/runs"
+
+# Public mode (DATA_AGENT_MODE=public, see agent/mode.py): one server, many visitors.
+# A kernel with a loaded dataset takes about 150-450 MiB (measured with Online
+# Retail II); 3 of them fit the 3 GB of docker-compose.public.yml with room for
+# uploads in the app process.
+MAX_ACTIVE_SESSIONS = 3
+# A visitor who did nothing for 15 minutes has probably left; their kernel is
+# closed to free a slot and started again (with the dataset) on the next question.
+IDLE_KERNEL_MINUTES = 15
+# Uploads, charts and logs of a session are deleted 2 hours after its last
+# activity: long enough for one visit, short enough not to keep visitors' data.
+SESSION_TTL_HOURS = 2
+# Larger than every test dataset (Online Retail II is 45 MB) yet bounded,
+# so a single upload cannot fill the server's memory.
+MAX_UPLOAD_MB = 50
+# How often idle kernels and old session folders are looked for.
+HOUSEKEEPING_INTERVAL_SECONDS = 60

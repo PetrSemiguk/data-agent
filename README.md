@@ -29,3 +29,19 @@ docker compose down
 
 The app runs as a non-root user on a read-only file system; `data/` is mounted
 read-only, and the analysis kernel gets no API key or other secrets.
+
+### Public mode
+
+`docker compose -f docker-compose.public.yml up -d` starts the app with
+`DATA_AGENT_MODE=public`: the server has no API key, each visitor enters their own
+(kept only in their browser tab), memory is off, each session has its own folders
+(deleted after 2 hours of inactivity), uploads are limited to 50 MB and at most 3
+sessions run a kernel at once. Limits are in `agent/config.py`.
+
+## Demo dataset
+
+`demo/demo_sales.csv` is synthetic sales data made by `scripts/make_demo_data.py`
+(fixed seed, so the file is always the same). It is invented rather than taken from
+Kaggle because the test datasets' licenses do not clearly allow shipping them with
+an app. It has the usual traps: duplicate rows, an incomplete last month, service
+rows that are not products, a tiny region that tops averages, and skewed amounts.

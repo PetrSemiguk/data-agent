@@ -8,13 +8,13 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import anthropic
 import streamlit as st
-from dotenv import load_dotenv
 from streamlit.delta_generator import DeltaGenerator
 from streamlit.elements.lib.mutable_status_container import StatusContainer
 from streamlit.runtime.uploaded_file_manager import UploadedFile
@@ -39,8 +39,11 @@ from agent.events import (
     VerifierEvent,
 )
 from agent.loop import HistoryTurn, RunResult, action_record, create_client, resume_agent, run_agent
-from agent.config import SKILLS_DEFAULT
+from agent import sessions
+from agent.config import HOUSEKEEPING_INTERVAL_SECONDS, SKILLS_DEFAULT
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint
+from agent.mode import Mode, get_mode, load_server_environment
+from agent.redact import mask_secrets
 from agent.sandbox import Sandbox
 from agent.skills_loader import Skill, load_skills
 from agent.usage import format_cost
@@ -48,8 +51,15 @@ from agent.tools import plan_summary
 from agent.verifier import VerificationReport
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-UPLOADS_DIR = PROJECT_ROOT / "uploads"
 PLACEHOLDER_KEY = "your-api-key-here"
+DEMO_FILE = PROJECT_ROOT / "demo" / "demo_sales.csv"
+DEMO_ID = "demo"
+KEY_NOTE = (
+    "Your key is used only in this browser tab and is not stored anywhere: it is "
+    "forgotten when you close the tab or click **Forget my key**. "
+    "Do not upload confidential data."
+)
+EXAMPLE_QUESTION = "Which region has the highest average order value?"
 
 TOOL_ICONS = {
     "get_schema": ":material/table_view:",
@@ -88,9 +98,16 @@ def escape_dollars(text: str) -> str:
 
 
 @st.cache_resource
-def get_client() -> anthropic.Anthropic:
-    """One API client for the whole server process."""
+def get_server_client() -> anthropic.Anthropic:
+    """One API client with the server's key for the whole process (local mode)."""
     return create_client()
+
+
+def get_client() -> anthropic.Anthropic:
+    """The visitor's own client when visitors bring keys, else the server's."""
+    if MODE.visitor_key:
+        return st.session_state.client
+    return get_server_client()
 
 
 @st.cache_resource
@@ -105,47 +122,135 @@ def get_skills() -> tuple[dict[str, Skill], list[str]]:
     return load_skills()
 
 
-def get_sandbox() -> Sandbox:
-    """One kernel per browser session, created on first use and reused on reruns."""
-    if "sandbox" not in st.session_state:
-        sandbox = Sandbox()
-        sandbox.start()
-        # Stop the kernel when the Streamlit process exits normally.
-        atexit.register(sandbox.shutdown)
-        st.session_state.sandbox = sandbox
-    return st.session_state.sandbox
+@st.cache_resource
+def get_pool(mode: Mode) -> sessions.KernelPool:
+    """The kernels of all sessions of this server process, with the mode's limits."""
+    idle = mode.idle_kernel_minutes
+    pool = sessions.KernelPool(mode.max_active_sessions, idle * 60 if idle is not None else None)
+    # Stop the kernels when the Streamlit process exits normally.
+    atexit.register(pool.close_all)
+    if idle is not None or mode.session_ttl_hours is not None:
+        sessions.start_housekeeping(pool, mode.session_ttl_hours, HOUSEKEEPING_INTERVAL_SECONDS)
+    return pool
+
+
+def session_dirs() -> sessions.SessionDirs:
+    """This session's folders: its own in public mode, the shared ones locally."""
+    return sessions.session_dirs(st.session_state.session_id if MODE.session_dirs else None)
+
+
+@contextmanager
+def session_sandbox(reload: bool = True) -> Iterator[Sandbox]:
+    """This session's kernel, started on first use or again after it was closed as idle.
+
+    A kernel started again gets the session's dataset back (unless `reload` is False).
+    Raises sessions.ServerBusy when no kernel slot is free.
+    """
+    with get_pool(MODE).using(st.session_state.session_id) as (sandbox, fresh):
+        dataset = st.session_state.get("dataset")
+        if fresh and reload and dataset is not None:
+            if not Path(dataset["path"]).exists():
+                # The session's files were deleted after SESSION_TTL_HOURS of inactivity.
+                st.session_state.dataset = None
+                st.session_state.dataset_gone = True
+                st.rerun()
+            sandbox.load_dataframe(dataset["path"])
+            st.toast("The analysis kernel was restarted after inactivity: the dataset was reloaded, "
+                     "variables from earlier questions are gone.", icon=":material/restart_alt:")
+        yield sandbox
 
 
 def save_upload(uploaded: UploadedFile) -> Path:
-    """Save the uploaded file into uploads/ under a safe name."""
-    UPLOADS_DIR.mkdir(exist_ok=True)
+    """Save the uploaded file into the session's uploads folder under a safe name."""
+    folder = session_dirs().uploads
+    folder.mkdir(parents=True, exist_ok=True)
     name = Path(uploaded.name)
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", name.stem).strip("_.") or "dataset"
-    path = UPLOADS_DIR / f"{stem}{name.suffix.lower()}"
+    path = folder / f"{stem}{name.suffix.lower()}"
     path.write_bytes(uploaded.getvalue())
     return path
 
 
-def load_dataset(uploaded: UploadedFile) -> None:
-    """Load a newly uploaded file into the kernel; do nothing on plain reruns."""
-    if st.session_state.get("file_id") == uploaded.file_id:
-        return
-    sandbox = get_sandbox()
-    path = save_upload(uploaded)
-    with st.spinner(f"Loading {uploaded.name}..."):
-        if "file_id" in st.session_state:
+def load_dataset(dataset_id: str, name: str, path: Path, size: int) -> None:
+    """Load a file into the session's kernel and start a new conversation."""
+    with st.spinner(f"Loading {name}..."), session_sandbox(reload=False) as sandbox:
+        if st.session_state.get("dataset") is not None:
             # A different file: start from a clean kernel so variables
             # from the previous dataset cannot leak into the new analysis.
             sandbox.restart()
         sandbox.load_dataframe(path)
         shape = sandbox.execute("df.shape").result or "(0, 0)"
         fingerprint = dataset_fingerprint(sandbox)
-    st.session_state.file_id = uploaded.file_id
+    st.session_state.dataset = {"id": dataset_id, "name": name, "path": str(path), "size": size}
     st.session_state.fingerprint = fingerprint
-    st.session_state.dataset_path = path
     st.session_state.shape = ast.literal_eval(shape)
     # A different file means a different conversation.
     new_conversation()
+
+
+def load_upload(uploaded: UploadedFile | None) -> None:
+    """Load a newly uploaded file; forget an upload the visitor removed."""
+    dataset = st.session_state.get("dataset")
+    if uploaded is None:
+        if dataset is not None and dataset["id"] != DEMO_ID:
+            st.session_state.dataset = None
+        st.session_state.last_upload_id = None
+        return
+    if st.session_state.get("last_upload_id") == uploaded.file_id:
+        return
+    st.session_state.last_upload_id = uploaded.file_id
+    error = sessions.upload_error(uploaded.size, MODE.max_upload_mb)
+    if error:
+        st.error(error)
+        return
+    load_dataset(uploaded.file_id, uploaded.name, save_upload(uploaded), uploaded.size)
+
+
+def accept_key() -> None:
+    """Check the key typed in the sidebar; keep it in this session only if it works."""
+    key = st.session_state.api_key_input.strip()
+    # The field is emptied right away, so the key stays in one place only.
+    st.session_state.api_key_input = ""
+    if not key:
+        return
+    try:
+        error = sessions.check_api_key(key)
+    except Exception as exc:
+        error = mask_secrets(f"The key could not be checked: {type(exc).__name__}: {exc}")
+    if error:
+        st.session_state.key_error = error
+        return
+    st.session_state.key_error = None
+    st.session_state.api_key = key
+    st.session_state.client = create_client(key)
+
+
+def forget_key() -> None:
+    for name in ("api_key", "client", "key_error"):
+        st.session_state.pop(name, None)
+
+
+def key_sidebar() -> None:
+    """Where visitors enter their own API key."""
+    st.header("API key")
+    if has_key():
+        st.success("Key accepted", icon=":material/key:")
+        st.button("Forget my key", on_click=forget_key, use_container_width=True)
+    else:
+        st.text_input(
+            "Anthropic API key",
+            type="password",
+            key="api_key_input",
+            on_change=accept_key,
+            placeholder="sk-ant-...",
+        )
+        if st.session_state.get("key_error"):
+            st.error(st.session_state.key_error)
+    st.caption(KEY_NOTE)
+
+
+def has_key() -> bool:
+    return not MODE.visitor_key or "client" in st.session_state
 
 
 def plan_markdown(items: list[dict[str, str]]) -> str:
@@ -530,38 +635,56 @@ def replay(events: list[Event], parent: DeltaGenerator, plan_slot: DeltaGenerato
         renderer(event)
 
 
+MODE = get_mode()
+load_server_environment(MODE)
+
 st.set_page_config(page_title="Data Agent", page_icon="📊", layout="wide")
 st.title("Data Agent")
 st.write("Upload a CSV or Excel file and ask questions about it in a chat.")
 
-load_dotenv()
-api_key = os.getenv("ANTHROPIC_API_KEY")
-if not api_key or api_key == PLACEHOLDER_KEY:
-    st.error(
-        "ANTHROPIC_API_KEY is not set. Put your API key into the .env file in the "
-        "project folder and restart the app."
-    )
-    st.stop()
+if not MODE.visitor_key:
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key or api_key == PLACEHOLDER_KEY:
+        st.error(
+            "ANTHROPIC_API_KEY is not set. Put your API key into the .env file in the "
+            "project folder and restart the app."
+        )
+        st.stop()
 
+if "session_id" not in st.session_state:
+    st.session_state.session_id = sessions.new_session_id()
 if "turns" not in st.session_state:
     new_conversation()
 
 with st.sidebar:
-    st.header("Dataset")
-    uploaded = st.file_uploader("CSV or Excel file", type=["csv", "xlsx"])
-    if uploaded is not None:
-        load_dataset(uploaded)
-        rows, cols = st.session_state.shape
-        st.write(f"**{uploaded.name}**")
-        st.caption(f"{uploaded.size / 1024 / 1024:.2f} MB · {rows:,} rows · {cols} columns")
+    if MODE.visitor_key:
+        key_sidebar()
 
-    if st.button("New conversation", disabled=uploaded is None, use_container_width=True):
+    st.header("Dataset")
+    uploaded = st.file_uploader("CSV or Excel file", type=["csv", "xlsx"], max_upload_size=MODE.max_upload_mb)
+    try:
+        load_upload(uploaded)
+        if MODE.demo_dataset and st.button("Use demo dataset", icon=":material/dataset:", use_container_width=True):
+            load_dataset(DEMO_ID, DEMO_FILE.name, DEMO_FILE, DEMO_FILE.stat().st_size)
+    except sessions.ServerBusy as exc:
+        st.warning(str(exc), icon=":material/hourglass:")
+    dataset = st.session_state.get("dataset")
+    if dataset is not None:
+        rows, cols = st.session_state.shape
+        st.write(f"**{dataset['name']}**")
+        st.caption(f"{dataset['size'] / 1024 / 1024:.2f} MB · {rows:,} rows · {cols} columns")
+    if st.session_state.pop("dataset_gone", False):
+        st.warning("This session's files were deleted after a long inactivity. Load the dataset again.")
+
+    if st.button("New conversation", disabled=dataset is None, use_container_width=True):
         # A clean kernel, so variables from the old chat cannot leak into the new one.
-        with st.spinner("Restarting the kernel..."):
-            sandbox = get_sandbox()
-            sandbox.restart()
-            sandbox.load_dataframe(st.session_state.dataset_path)
-        new_conversation()
+        try:
+            with st.spinner("Restarting the kernel..."), session_sandbox(reload=False) as sandbox:
+                sandbox.restart()
+                sandbox.load_dataframe(dataset["path"])
+            new_conversation()
+        except sessions.ServerBusy as exc:
+            st.warning(str(exc), icon=":material/hourglass:")
 
     verify = st.toggle(
         "Verify answers",
@@ -570,7 +693,8 @@ with st.sidebar:
         "contradicted claims are sent back to the agent to fix.",
     )
 
-    use_memory = st.toggle(
+    # Memory is shared by everyone who loads the same data, so only the local mode offers it.
+    use_memory = MODE.memory and st.toggle(
         "Use memory",
         value=True,
         help="Load this dataset's notes from earlier sessions and let the agent save new ones.",
@@ -586,7 +710,7 @@ with st.sidebar:
             st.markdown(f"**{skill.name}** · {escape_dollars(skill.description)}")
         for warning in skill_warnings:
             st.caption(escape_dollars(f":material/warning: {warning}"))
-    if uploaded is not None:
+    if MODE.memory and dataset is not None:
         memory_sidebar(get_memory_store(), st.session_state.fingerprint)
 
     turns: list[dict[str, Any]] = st.session_state.turns
@@ -595,7 +719,15 @@ with st.sidebar:
     cost = st.session_state.get("past_cost", 0.0) + turn_cost(turns)
     st.caption(f"This session: {questions} questions · {tokens:,} tokens · \\${cost:.3f}")
 
-if not turns:
+if not has_key():
+    st.info(
+        "This is an AI data analyst: it explores a table, writes and runs pandas code, "
+        "checks its own numbers and answers with the evidence. It runs on your own "
+        "Anthropic API key, which you enter in the sidebar.\n\n"
+        f"**Example:** click *Use demo dataset* and ask: *{EXAMPLE_QUESTION}*",
+        icon=":material/key:",
+    )
+elif not turns:
     st.info("Upload a dataset in the sidebar, then ask your first question below.")
 
 # The whole chat is redrawn from session_state on every rerun.
@@ -611,6 +743,8 @@ for index, turn in enumerate(turns):
             st.warning("This question did not finish.")
         elif result.status != "waiting_for_user":
             show_result(result)
+        elif index == len(turns) - 1 and not has_key():
+            st.info("The agent is waiting for your reply. Enter your API key in the sidebar to continue.")
         elif index == len(turns) - 1 and result.state is not None:
             # The agent asked a question or an approval inside this answer: ask the human here.
             slot = st.empty()
@@ -622,52 +756,63 @@ for index, turn in enumerate(turns):
                 reply = ask_question(slot, result, key)
             if reply is not None:
                 slot.empty()
-                with st.spinner("The agent continues..."):
-                    turn["result"] = resume_agent(
-                        result.state,
-                        reply,
-                        get_sandbox(),
-                        get_client(),
-                        on_event=live_handler(
-                            turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
-                        ),
-                    )
+                try:
+                    with st.spinner("The agent continues..."), session_sandbox() as sandbox:
+                        turn["result"] = resume_agent(
+                            result.state,
+                            reply,
+                            sandbox,
+                            get_client(),
+                            on_event=live_handler(
+                                turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
+                            ),
+                        )
+                except sessions.ServerBusy as exc:
+                    st.warning(str(exc), icon=":material/hourglass:")
+                    st.stop()
                 st.rerun()
 
 waiting = bool(turns) and turns[-1]["result"] is not None and turns[-1]["result"].status == "waiting_for_user"
-if uploaded is None:
+if not has_key():
+    hint = "Enter your Anthropic API key in the sidebar to start"
+elif dataset is None:
     hint = "Upload a dataset to start"
 elif waiting:
     hint = "Respond to the agent above first"
 else:
     hint = "Ask a question about the data"
-prompt = st.chat_input(hint, disabled=uploaded is None or waiting)
+prompt = st.chat_input(hint, disabled=not has_key() or dataset is None or waiting)
 
 if prompt:
     history = chat_history(turns)
     turn = {"question": prompt, "events": [], "result": None}
-    turns.append(turn)
     with st.chat_message("user"):
         st.markdown(escape_dollars(prompt))
     with st.chat_message("assistant"):
         plan_slot = st.empty()
         steps_area = st.container()
-        with st.spinner("The agent is analyzing the data..."):
-            turn["result"] = run_agent(
-                prompt,
-                get_sandbox(),
-                get_client(),
-                dataset_file=str(st.session_state.dataset_path),
-                on_event=live_handler(
-                    turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
-                ),
-                pause_on_ask=True,
-                history=history,
-                conversation_id=st.session_state.conversation_id,
-                turn=len(turns),
-                verify=verify,
-                memory=DatasetMemory(get_memory_store(), st.session_state.fingerprint) if use_memory else None,
-                skills=skills if use_skills else None,
-            )
+        try:
+            with st.spinner("The agent is analyzing the data..."), session_sandbox() as sandbox:
+                turns.append(turn)
+                turn["result"] = run_agent(
+                    prompt,
+                    sandbox,
+                    get_client(),
+                    dataset_file=dataset["path"],
+                    on_event=live_handler(
+                        turn["events"], StepRenderer(steps_area, live=True, plan_slot=plan_slot)
+                    ),
+                    pause_on_ask=True,
+                    history=history,
+                    conversation_id=st.session_state.conversation_id,
+                    turn=len(turns),
+                    verify=verify,
+                    memory=DatasetMemory(get_memory_store(), st.session_state.fingerprint) if use_memory else None,
+                    skills=skills if use_skills else None,
+                    dirs=session_dirs().runs,
+                )
+        except sessions.ServerBusy as exc:
+            st.warning(str(exc), icon=":material/hourglass:")
+            st.stop()
     # Rebuild the page from the new state (answer, question widget, input state).
     st.rerun()

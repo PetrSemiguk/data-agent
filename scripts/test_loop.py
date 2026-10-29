@@ -941,7 +941,7 @@ def main() -> int:
         client = FakeClient([api_error(anthropic.AuthenticationError, 401, "invalid x-api-key")])
         result, log = run(sb, client)
         report("b) AuthenticationError -> api_error",
-               result.status == "api_error" and "ANTHROPIC_API_KEY" in (result.error_message or "")
+               result.status == "api_error" and "API key was rejected" in (result.error_message or "")
                and log is not None and log["status"] == "api_error",
                f"{result.error_message} | log saved: {log is not None}")
 
