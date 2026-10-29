@@ -19,6 +19,7 @@ from agent.config import (
 )
 from agent.guard import check_code
 from agent.memory import NOTE_KINDS
+from agent.skills_loader import Skill
 from agent.sandbox import Sandbox
 
 # Shows a question (with optional choices) to a human and returns the raw answer.
@@ -47,6 +48,9 @@ class ToolContext:
     memory_note_ids: set[int] | None = None
     # Notes from remember calls, saved to memory only when the run succeeds.
     pending_notes: list[dict[str, Any]] = field(default_factory=list)
+    # Skills the model may load (None = skills off) and the names it loaded.
+    skills: dict[str, Skill] | None = None
+    loaded_skills: list[str] = field(default_factory=list)
 
 GET_SCHEMA_TOOL: dict[str, Any] = {
     "name": "get_schema",
@@ -236,6 +240,23 @@ UPDATE_PLAN_TOOL: dict[str, Any] = {
             },
         },
         "required": ["items"],
+    },
+}
+
+LOAD_SKILL_TOOL: dict[str, Any] = {
+    "name": "load_skill",
+    "description": (
+        "Load a skill: a methodology guide with steps, typical pitfalls and a checklist "
+        "for the final answer. If the question fits a skill from the list in the system "
+        "prompt, load it at the start, in the same response as get_schema; you may load "
+        "several. Returns the guide's text."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "The skill's name from the list, e.g. 'time-series'."},
+        },
+        "required": ["name"],
     },
 }
 
@@ -789,6 +810,20 @@ def remember(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
     return f"Noted{target}. It is saved to memory only if this run finishes successfully.", False
 
 
+
+def load_skill(tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
+    """Return the text of a skill and note that it was loaded."""
+    if not ctx.skills:
+        return "Skills are off for this run.", True
+    name = tool_input.get("name")
+    skill = ctx.skills.get(name) if isinstance(name, str) else None
+    if skill is None:
+        return f"Unknown skill {name!r}. Available skills: {', '.join(ctx.skills)}.", True
+    if skill.name not in ctx.loaded_skills:
+        ctx.loaded_skills.append(skill.name)
+    return f"Skill '{skill.name}' loaded. Follow it in this analysis.\n\n{skill.body}", False
+
+
 ToolHandler = Callable[[dict[str, Any], ToolContext], tuple[str, bool]]
 
 TOOL_HANDLERS: dict[str, ToolHandler] = {
@@ -799,7 +834,11 @@ TOOL_HANDLERS: dict[str, ToolHandler] = {
     ASK_USER_TOOL["name"]: ask_user,
     REPORT_VERIFICATION_TOOL["name"]: report_verification,
     REMEMBER_TOOL["name"]: remember,
+    LOAD_SKILL_TOOL["name"]: load_skill,
 }
+
+# A skill is useless when cut in the middle, so its text is never truncated.
+NOT_TRUNCATED = {LOAD_SKILL_TOOL["name"]}
 
 
 def execute_tool(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> tuple[str, bool]:
@@ -815,4 +854,4 @@ def execute_tool(name: str, tool_input: dict[str, Any], ctx: ToolContext) -> tup
         return f"Unknown tool: {name}. Available tools: {available}.", True
 
     text, is_error = handler(tool_input, ctx)
-    return truncate_output(text), is_error
+    return (text if name in NOT_TRUNCATED else truncate_output(text)), is_error

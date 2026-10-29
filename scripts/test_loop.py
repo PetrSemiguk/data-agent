@@ -33,6 +33,7 @@ from agent.events import (  # noqa: E402
     PlanUpdated,
     RunFinished,
     RunStarted,
+    SkillLoaded,
     StepStarted,
     StreamReset,
     TextDelta,
@@ -44,6 +45,7 @@ from agent.events import (  # noqa: E402
 )
 from agent.loop import HistoryTurn, RunResult, action_record, build_messages, resume_agent, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore  # noqa: E402
+from agent.skills_loader import load_skills  # noqa: E402
 from agent.tools import EXPORT_DENIED, EXPORT_NO_APPROVER, QUESTION_LIMIT_REACHED  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 
@@ -769,6 +771,47 @@ def main() -> int:
                f"status={result.status}, {result.memory_not_saved}; verifier tools={client.tools[2]}")
         cleanup(result)
         shutil.rmtree(memory_dir, ignore_errors=True)
+
+        # as) Skills: the list goes into the system prompt, load_skill is offered and logged
+        skills, _ = load_skills()
+        events = []
+        client = FakeClient([
+            make_response([SimpleNamespace(type="tool_use", id="toolu_skill", name="load_skill",
+                                           input={"name": "time-series"})], "tool_use"),
+            make_response([text("Done.")], "end_turn"),
+        ])
+        result = run_agent("Q", sb, client, skills=skills, on_event=events.append)  # type: ignore[arg-type]
+        loaded = [e.name for e in events if isinstance(e, SkillLoaded)]
+        log = read_log(result)
+        body = last_tool_results(client, 2)[0]["content"]
+        report("as) skills listed, loaded and logged",
+               "load_skill" in client.tools[0] and "Available skills:" in client.systems[0]
+               and all(f"- {name}: " in client.systems[0] for name in skills)
+               and loaded == ["time-series"] and result.loaded_skills == ["time-series"]
+               and body.startswith("Skill 'time-series' loaded") and skills["time-series"].body in body
+               and log is not None and log["skills"] == {"available": list(skills), "loaded": ["time-series"]},
+               f"SkillLoaded={loaded}, result.loaded_skills={result.loaded_skills}, log={log['skills'] if log else '-'}")
+        cleanup(result)
+
+        # at) Without skills (--no-skills, toggle off): no list in the prompt and no tool
+        client = FakeClient([make_response([text("Done.")], "end_turn")])
+        result = run_agent("Q", sb, client)  # type: ignore[arg-type]
+        report("at) skills off -> no list, no tool",
+               "load_skill" not in client.tools[0] and "Available skills" not in client.systems[0]
+               and not result.loaded_skills,
+               f"tools={client.tools[0]}")
+        cleanup(result)
+
+        # au) The verifier gets no skills
+        client = FakeClient([
+            make_response([text("Revenue is 10.")], "end_turn"),
+            make_response([report_use([CLAIM_OK])], "tool_use"),
+        ])
+        result = run_agent("Q", sb, client, skills=skills, verify=True)  # type: ignore[arg-type]
+        report("au) verifier gets no skills",
+               "load_skill" not in client.tools[1] and "Available skills" not in client.systems[1],
+               f"verifier tools={client.tools[1]}")
+        cleanup(result)
 
         # g) A crashing event handler does not break the run
         def broken_handler(event: Event) -> None:

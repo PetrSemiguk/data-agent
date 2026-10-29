@@ -26,6 +26,7 @@ from agent.events import (
     AssistantText,
     Event,
     RunFinished,
+    SkillLoaded,
     StepStarted,
     StreamReset,
     TextDelta,
@@ -40,6 +41,7 @@ from agent.events import (
 from agent.loop import HistoryTurn, RunResult, action_record, create_client, resume_agent, run_agent
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint
 from agent.sandbox import Sandbox
+from agent.skills_loader import Skill, load_skills
 from agent.tools import plan_summary
 from agent.verifier import VerificationReport
 
@@ -54,6 +56,7 @@ TOOL_ICONS = {
     "save_chart": ":material/bar_chart:",
     "export_data": ":material/download:",
     "remember": ":material/bookmark_add:",
+    "load_skill": ":material/school:",
     "ask_user": ":material/help:",
     "report_verification": ":material/fact_check:",
 }
@@ -92,6 +95,12 @@ def get_client() -> anthropic.Anthropic:
 def get_memory_store() -> MemoryStore:
     """One memory database for the whole server process."""
     return MemoryStore()
+
+
+@st.cache_resource
+def get_skills() -> tuple[dict[str, Skill], list[str]]:
+    """Skills and loader warnings, read once per server process (restart to reload)."""
+    return load_skills()
 
 
 def get_sandbox() -> Sandbox:
@@ -240,6 +249,8 @@ class StepRenderer:
                     self.box.image(path, caption=Path(path).name)
             case PlanUpdated(items=items) if self.plan_slot:
                 self.plan_slot.container(border=True).markdown(plan_markdown(items))
+            case SkillLoaded(name=name) if self.box:
+                self.box.caption(f":material/school: Skill loaded: {name}")
             case ApprovalResolved(request=request, approved=approved, automatic=automatic):
                 # The request and the decision stay visible between the steps.
                 decision = "Approved" if approved else ("Denied automatically (no user)" if automatic else "Denied")
@@ -542,6 +553,17 @@ with st.sidebar:
         value=True,
         help="Load this dataset's notes from earlier sessions and let the agent save new ones.",
     )
+    use_skills = st.toggle(
+        "Use skills",
+        value=True,
+        help="Offer the agent methodology guides (skills) it can load for the question.",
+    )
+    skills, skill_warnings = get_skills()
+    with st.expander(f"Skills ({len(skills)})"):
+        for skill in skills.values():
+            st.markdown(f"**{skill.name}** · {escape_dollars(skill.description)}")
+        for warning in skill_warnings:
+            st.caption(escape_dollars(f":material/warning: {warning}"))
     if uploaded is not None:
         memory_sidebar(get_memory_store(), st.session_state.fingerprint)
 
@@ -622,6 +644,7 @@ if prompt:
                 turn=len(turns),
                 verify=verify,
                 memory=DatasetMemory(get_memory_store(), st.session_state.fingerprint) if use_memory else None,
+                skills=skills if use_skills else None,
             )
     # Rebuild the page from the new state (answer, question widget, input state).
     st.rerun()

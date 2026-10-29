@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from agent.console import ConsolePrinter  # noqa: E402
 from agent.loop import create_client, run_agent  # noqa: E402
 from agent.memory import DatasetMemory, MemoryStore, dataset_fingerprint  # noqa: E402
+from agent.skills_loader import load_skills  # noqa: E402
 from agent.sandbox import Sandbox  # noqa: E402
 from agent.tools import ApprovalRequest  # noqa: E402
 
@@ -51,6 +52,11 @@ def main() -> int:
         action="store_true",
         help="Do not load or save this dataset's memory from earlier sessions",
     )
+    parser.add_argument(
+        "--no-skills",
+        action="store_true",
+        help="Do not offer skills (methodology guides) to the agent",
+    )
     args = parser.parse_args()
     # Symbols such as ✔ may not exist in the console encoding; print '?' instead of failing.
     sys.stdout.reconfigure(errors="replace")  # type: ignore[union-attr]
@@ -62,6 +68,12 @@ def main() -> int:
 
     with Sandbox() as sb:
         sb.load_dataframe(args.file)
+        skills = None
+        if not args.no_skills:
+            skills, skill_warnings = load_skills()
+            print(f"Skills: {len(skills)} available ({', '.join(skills) or 'none'})")
+            for warning in skill_warnings:
+                print(f"  [Warning] {warning}")
         memory = None
         if not args.no_memory:
             memory = DatasetMemory(MemoryStore(), dataset_fingerprint(sb))
@@ -77,6 +89,7 @@ def main() -> int:
             verify=False if args.no_verify else None,
             approve_fn=None if args.non_interactive else console_approve,
             memory=memory,
+            skills=skills,
         )
 
     print(f"\n{'=' * 30} Result: {result.status} {'=' * 30}")
@@ -94,6 +107,8 @@ def main() -> int:
     )
     for path in result.exports:
         print(f"Exported file: {path}")
+    if result.loaded_skills:
+        print(f"Skills loaded: {', '.join(result.loaded_skills)}")
     for note in result.remembered:
         print(f"Remembered: {note}")
     for note in result.not_remembered:

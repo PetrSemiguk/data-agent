@@ -12,6 +12,7 @@ from agent.events import (
     PlanUpdated,
     RunFinished,
     RunStarted,
+    SkillLoaded,
     StepStarted,
     StreamReset,
     TextDelta,
@@ -83,6 +84,8 @@ class ConsolePrinter:
                 print(f"[Waiting for the user] {question}")
             case UserAnswered(answer=answer):
                 print(f"[User answered] {answer or '(left to the agent)'}")
+            case SkillLoaded(name=name):
+                print(f"[Skill loaded] {name}")
             case ApprovalRequested(request=request):
                 self._end_line()
                 print(f"[Approval needed] {request.action}")

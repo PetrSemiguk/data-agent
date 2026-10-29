@@ -48,6 +48,14 @@ user's decisions: use them as a starting point and do not ask again about a deci
 recorded there. If the data contradicts a note, tell the user and update the note with \
 remember (replaces)."""
 
+# Appended to SYSTEM_PROMPT when skills are on; {skills} is the "- name: description" list.
+SKILLS_PROMPT = """
+
+Skills are methodology guides for common kinds of analysis: steps, typical pitfalls and \
+a checklist for the final answer. If the question fits a skill, load it with load_skill \
+at the start, in the same response as get_schema; you may load several. Available skills:
+{skills}"""
+
 VERIFIER_PROMPT = """You are a fact-checker. A data analyst answered a user's question \
 about a dataset. The dataset is loaded into a pandas DataFrame named `df`. You see only \
 the question and the final answer, not the analyst's work. Do not trust the answer: \

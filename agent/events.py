@@ -98,6 +98,14 @@ class UserAnswered:
 
 
 @dataclass(frozen=True)
+class SkillLoaded:
+    """The agent loaded a skill (a methodology guide) into its context."""
+
+    step: int
+    name: str
+
+
+@dataclass(frozen=True)
 class ApprovalRequested:
     """The agent wants to do a risky action (e.g. export a file) and needs the human's approval."""
 
@@ -178,6 +186,7 @@ Event = (
     | PlanUpdated
     | UserQuestion
     | UserAnswered
+    | SkillLoaded
     | ApprovalRequested
     | ApprovalResolved
     | VerificationStarted

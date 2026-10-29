@@ -35,6 +35,7 @@ from agent.events import (
     EventHandler,
     RunFinished,
     RunStarted,
+    SkillLoaded,
     StepStarted,
     StreamReset,
     TextDelta,
@@ -48,11 +49,13 @@ from agent.events import (
     VerifierEvent,
 )
 from agent.memory import DatasetMemory, MemoryFullError, memory_context
-from agent.prompts import SYSTEM_PROMPT
+from agent.prompts import SKILLS_PROMPT, SYSTEM_PROMPT
+from agent.skills_loader import Skill, skills_list
 from agent.sandbox import Sandbox
 from agent.tools import (
     ASK_USER_TOOL,
     EXPORT_DATA_TOOL,
+    LOAD_SKILL_TOOL,
     REMEMBER_TOOL,
     TOOLS,
     UPDATE_PLAN_TOOL,
@@ -193,6 +196,9 @@ class AgentState:
     remembered: list[str] = field(default_factory=list)
     not_remembered: list[str] = field(default_factory=list)
     memory_not_saved: str | None = None
+    # Skills offered to the model (None = off) and the names it loaded, in order.
+    skills: dict[str, Skill] | None = None
+    loaded_skills: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -239,6 +245,7 @@ class RunResult:
     remembered: list[str] = field(default_factory=list)
     not_remembered: list[str] = field(default_factory=list)
     memory_not_saved: str | None = None
+    loaded_skills: list[str] = field(default_factory=list)
 
 
 def create_client() -> anthropic.Anthropic:
@@ -262,6 +269,7 @@ def run_agent(
     verify: bool | None = None,
     approve_fn: ApproveFn | None = None,
     memory: DatasetMemory | None = None,
+    skills: dict[str, Skill] | None = None,
 ) -> RunResult:
     """Answer a question about the data in the sandbox.
 
@@ -286,6 +294,9 @@ def run_agent(
     first user message and the agent gets the remember tool; its new notes are
     saved only if the run succeeds.
 
+    With `skills`, their names and descriptions are added to the system prompt
+    and the agent gets the load_skill tool.
+
     With `verify` (default VERIFY_ANSWERS), a final answer that contains numbers
     is checked by the verifier; if it contradicts claims, the agent gets the
     remarks and revises the answer within the same run and limits.
@@ -306,10 +317,13 @@ def run_agent(
                 "fingerprint": memory.fingerprint,
                 "loaded": [note.id for note in notes],
             } if memory else None,
+            "skills": {"available": list(skills), "loaded": []} if skills else None,
         },
         question=question,
         verify=VERIFY_ANSWERS if verify is None else verify,
-        tools=[*TOOLS, REMEMBER_TOOL] if memory else TOOLS,
+        system=SYSTEM_PROMPT + SKILLS_PROMPT.format(skills=skills_list(skills)) if skills else SYSTEM_PROMPT,
+        tools=[*TOOLS, *([LOAD_SKILL_TOOL] if skills else []), *([REMEMBER_TOOL] if memory else [])],
+        skills=skills or None,
         memory=memory,
         memory_note_ids=[note.id for note in notes],
     )
@@ -544,6 +558,8 @@ def continue_run(
         namespace=state.namespace,
         memory_note_ids=set(state.memory_note_ids) if state.memory else None,
         pending_notes=state.pending_notes,
+        skills=state.skills,
+        loaded_skills=state.loaded_skills,
     )
     step_logs: list[dict[str, Any]] = state.log["steps"]
 
@@ -706,6 +722,8 @@ def continue_run(
                     plan = copy.deepcopy(ctx.plan)
                     step_log.setdefault("plan_updates", []).append(plan)
                     emit(PlanUpdated(step=step, items=plan))
+                if block.name == LOAD_SKILL_TOOL["name"] and not is_error:
+                    emit(SkillLoaded(step=step, name=str(block.input.get("name"))))
                 if block.name == state.finish_tool and not is_error:
                     state.finish_input = block.input
 
@@ -758,6 +776,8 @@ def continue_run(
             state.verification_warning = REVISION_FAILED_WARNING
         if state.verification_warning:
             warnings.append(state.verification_warning)
+        if state.log.get("skills"):
+            state.log["skills"]["loaded"] = list(state.loaded_skills)
         if status != "waiting_for_user":
             save_memory(state, status, revision_failed)
         if state.memory_not_saved:
@@ -825,6 +845,7 @@ def continue_run(
             remembered=list(state.remembered),
             not_remembered=list(state.not_remembered),
             memory_not_saved=state.memory_not_saved,
+            loaded_skills=list(state.loaded_skills),
             plan=copy.deepcopy(state.plan),
             plan_incomplete=plan_incomplete,
             verification=report,

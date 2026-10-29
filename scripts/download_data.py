@@ -32,6 +32,16 @@ def main() -> None:
     print("Path to dataset files:", path)
     copy_data_files(path)
 
+    # Hold-out datasets from other domains: used only to evaluate the agent,
+    # never when writing prompts or skills.
+    path = kagglehub.dataset_download("pavansubhasht/ibm-hr-analytics-attrition-dataset")
+    print("Path to dataset files:", path)
+    copy_data_files(path)
+
+    path = kagglehub.dataset_download("sumanthvrao/daily-climate-time-series-data")
+    print("Path to dataset files:", path)
+    copy_data_files(path)
+
     # Show what ended up in data/.
     print("\nFiles in data/:")
     for file in sorted(DATA_DIR.iterdir()):
