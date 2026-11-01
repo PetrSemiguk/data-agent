@@ -4,7 +4,6 @@ An AI data analyst: upload a CSV or Excel file, ask a question in plain language
 the agent explores the data, writes and runs pandas code, checks its own numbers and
 answers with the evidence.
 
-<!-- TODO (author): record the demo and add docs/demo.gif -->
 ![Demo](docs/demo.gif)
 
 ## Why not just upload the file to a chatbot?
@@ -134,8 +133,8 @@ python scripts/download_data.py     # test datasets into data/
 streamlit run app.py
 ```
 
-One question from the console:
-`python scripts/run_agent.py --file "data/Titanic-Dataset.csv" --question "How many passengers survived?"`
+One question from the console (without `--yes` it only prints the estimated cost):
+`python scripts/run_agent.py --file "data/Titanic-Dataset.csv" --question "How many passengers survived?" --yes`
 
 **Docker, local mode** (key from `.env`, `data/` mounted read-only)
 
@@ -157,21 +156,23 @@ Tests use a fake Claude client and cost nothing:
 
 ```
 python scripts/test_loop.py         # likewise test_tools, test_guard, test_sandbox, test_memory,
-                                    # test_skills, test_public, test_grade, test_report, test_run_evals
+                                    # test_skills, test_public, test_grade, test_report, test_run_evals,
+                                    # test_paid_scripts
 ```
 
-These call the real API and cost money:
+These call the real API and cost money. Each runs only with `--yes`; without it, it
+prints the estimated cost and exits (`--help` is always safe):
 
 | Command | What | Approx. cost |
 |---|---|---|
-| `python scripts/check_api.py` | one tiny request | < $0.001 |
-| `python scripts/test_revision_real.py` | one verified run with a planted error | ~$0.04 |
-| `python scripts/test_verifier_cases.py` | 5 verifier regression cases | ~$0.11 |
-| `python evals/test_grader_cases.py` | 64 grader checks (Haiku judge) | ~$0.01 |
-| `python evals/run_evals.py --split dev --repeats 3 --name my_run` | agent + verifier on 11 questions, 3 times | ~$1 |
-| `python evals/grade.py --name my_run`, then `python evals/report.py --name my_run` | grade (Haiku judge) and report | a few cents |
+| `python scripts/check_api.py --yes` | one tiny request | < $0.001 |
+| `python scripts/test_revision_real.py --yes` | one verified run with a planted error | ~$0.04 |
+| `python scripts/test_verifier_cases.py --yes` | 5 verifier regression cases | ~$0.11 |
+| `python evals/test_grader_cases.py --yes` | 64 grader checks (Haiku judge) | ~$0.01 |
+| `python evals/run_evals.py --split dev --repeats 3 --name my_run` (asks to confirm, or `--yes`) | agent + verifier on 11 questions, 3 times | ~$1 |
+| `python evals/grade.py --name my_run --yes`, then `python evals/report.py --name my_run` | grade (Haiku judge) and report; the report itself is free | a few cents |
 
-`run_evals.py` asks for confirmation and takes `--max-cost` as a hard limit.
+`run_evals.py` also takes `--max-cost` as a hard limit for the whole run.
 
 ## Project structure
 
